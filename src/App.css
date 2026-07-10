@@ -1,0 +1,195 @@
+:root {
+  --bg: #f7f5f0;
+  --panel: #ffffff;
+  --ink: #2a2622;
+  --muted: #8a8178;
+  --line: #e6e1d8;
+  --accent: #3f6f52;
+  --accent-soft: #e7efe8;
+  --select: #d8e8dd;
+  font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.titlebar {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.55rem 1.1rem;
+  background: var(--accent);
+  color: #f4efe6;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.15);
+}
+.titlebar .brand {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.titlebar .tagline {
+  font-size: 0.85rem;
+  font-style: italic;
+  opacity: 0.85;
+}
+
+.reader {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Sidebar */
+.sidebar {
+  width: 220px;
+  flex: none;
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 0.75rem 0.5rem 2rem;
+}
+.book-group h3 {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0.9rem 0.5rem 0.4rem;
+}
+.book {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.28rem 0.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.book:hover {
+  background: var(--accent-soft);
+}
+.book.active {
+  background: var(--accent);
+  color: #f4efe6;
+}
+
+/* Reading pane */
+.reading {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.reading-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg);
+}
+.reading-header h2 {
+  margin: 0;
+  font-size: 1.4rem;
+}
+.controls {
+  display: flex;
+  gap: 0.5rem;
+}
+.controls select {
+  font: inherit;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.verses {
+  overflow-y: auto;
+  padding: 1.5rem clamp(1.5rem, 8vw, 6rem);
+  line-height: 1.9;
+  font-size: 1.18rem;
+  flex: 1;
+}
+.verse {
+  margin: 0 0 0.35rem;
+}
+.verse.selected {
+  background: var(--select);
+  border-radius: 4px;
+}
+.vnum {
+  color: var(--accent);
+  font-size: 0.7rem;
+  font-weight: 700;
+  margin-right: 0.35rem;
+  cursor: pointer;
+  vertical-align: super;
+}
+.vnum:hover {
+  text-decoration: underline;
+}
+.word {
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 0 1px;
+}
+.word:hover {
+  background: var(--accent-soft);
+}
+.word.selected {
+  background: var(--select);
+  outline: 1px solid var(--accent);
+}
+
+.statusbar {
+  border-top: 1px solid var(--line);
+  padding: 0.5rem 1.5rem;
+  font-size: 0.85rem;
+  color: var(--ink);
+  background: var(--panel);
+}
+.statusbar .hint {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  padding: 3rem;
+}
+.empty pre {
+  display: inline-block;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0.6rem 1rem;
+  color: var(--ink);
+}
