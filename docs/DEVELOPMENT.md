@@ -30,8 +30,12 @@ python3 scripts/import_bible.py                      # WEB (default)
 python3 scripts/import_bible.py --translation kjv
 ```
 
-Both importers tokenize identically; a test asserts it, because a mismatch
-would shift token indices and move every word anchor.
+Both importers read the same registry and tokenize identically; a test asserts
+it, because a mismatch would shift token indices and move every word anchor.
+Importing KJV both ways produces byte-identical verse and token rows.
+
+Text is fetched from the getbible API over HTTPS but is **not** checksum- or
+signature-verified — see the Phase 2 deviation note in [`PLAN.md`](./PLAN.md).
 
 ## Run
 

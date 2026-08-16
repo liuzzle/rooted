@@ -53,12 +53,17 @@ BOOKS: list[tuple[str, str, str]] = [
     ("Rev", "Revelation", "NT"),
 ]
 
-# getbible slug -> (abbrev, display name, license)
-TRANSLATIONS = {
-    "web": ("WEB", "World English Bible", "Public Domain"),
-    "kjv": ("KJV", "King James Version", "Public Domain"),
-    "asv": ("ASV", "American Standard Version", "Public Domain"),
-}
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_registry() -> dict[str, dict]:
+    """getbible slug -> pack entry, from the same registry the app ships."""
+    path = REPO_ROOT / "src-tauri" / "packs" / "registry.json"
+    packs = json.loads(path.read_text(encoding="utf-8"))["packs"]
+    return {p["slug"]: p for p in packs}
+
+
+TRANSLATIONS = load_registry()
 
 # Word tokenizer: unicode words with internal apostrophes/hyphens.
 WORD_RE = re.compile(r"[^\W_]+(?:['’\-][^\W_]+)*", re.UNICODE)
@@ -78,7 +83,7 @@ def default_db_path() -> Path:
 
 def migration_sql() -> str:
     """All migrations, in order — the same set the app applies on start."""
-    folder = Path(__file__).resolve().parent.parent / "src-tauri" / "migrations"
+    folder = REPO_ROOT / "src-tauri" / "migrations"
     return "\n".join(p.read_text(encoding="utf-8") for p in sorted(folder.glob("*.sql")))
 
 
@@ -113,7 +118,8 @@ def main() -> int:
     args = ap.parse_args()
 
     slug = args.translation
-    abbrev, name, license_ = TRANSLATIONS[slug]
+    pack = TRANSLATIONS[slug]
+    abbrev, name = pack["abbrev"], pack["name"]
     db_path = Path(args.db) if args.db else default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -128,11 +134,13 @@ def main() -> int:
         [(osis, i + 1, disp, test) for i, (osis, disp, test) in enumerate(BOOKS)],
     )
 
-    # Upsert the translation, then re-import cleanly.
+    # Upsert the translation, then re-import cleanly. The translation row is
+    # never deleted, so the id stays stable and word anchors keep resolving.
     conn.execute(
-        "INSERT OR IGNORE INTO translations(abbrev, name, language, license, source_type) "
-        "VALUES (?,?,?,?, 'bundled')",
-        (abbrev, name, "en", license_),
+        "INSERT OR IGNORE INTO translations"
+        "(abbrev, name, language, license, source_type, versification) "
+        "VALUES (?,?,?,?, 'bundled', ?)",
+        (abbrev, name, pack["language"], pack["license"], pack["versification"]),
     )
     tid = conn.execute("SELECT id FROM translations WHERE abbrev = ?", (abbrev,)).fetchone()[0]
     conn.execute("DELETE FROM tokens WHERE translation_id = ?", (tid,))
