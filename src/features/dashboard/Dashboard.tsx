@@ -185,7 +185,12 @@ export default function Dashboard({
                 >
                   <span className="recent-ref">
                     <span className={`swatch-dot hl-${h.color}`} />
-                    {formatReference(h.book_name, h.verse_id, h.chapter, h.verse)}
+                    {formatReference(
+                      h.book_name,
+                      h.verse_id.split(".")[0],
+                      h.chapter,
+                      h.verse,
+                    )}
                   </span>
                   <span className="recent-body">
                     {h.anchor_type === "word" && h.surface
@@ -283,6 +288,13 @@ function BookBars({ counts }: { counts: { key: string; label: string | null; cou
   );
 }
 
+/** Local `YYYY-MM-DD` — matches the keys the query groups by. */
+function localDayKey(d: Date): string {
+  const month = `${d.getMonth() + 1}`.padStart(2, "0");
+  const day = `${d.getDate()}`.padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
+}
+
 /**
  * Notes per day over the trailing window. The query returns only days that have
  * notes, so the empty days are filled in here — otherwise the shape would lie.
@@ -290,31 +302,38 @@ function BookBars({ counts }: { counts: { key: string; label: string | null; cou
 function NotesTrend({ counts }: { counts: { key: string; count: number }[] }) {
   const byDay = new Map(counts.map((c) => [c.key, c.count]));
   const today = new Date();
-  const days: { date: string; count: number }[] = [];
+  const days: { date: Date; key: string; count: number }[] = [];
   for (let i = TREND_DAYS - 1; i >= 0; i--) {
-    const d = new Date(today);
-    d.setDate(today.getDate() - i);
-    const key = d.toISOString().slice(0, 10);
-    days.push({ date: key, count: byDay.get(key) ?? 0 });
+    const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+    const key = localDayKey(d);
+    days.push({ date: d, key, count: byDay.get(key) ?? 0 });
   }
   const max = Math.max(1, ...days.map((d) => d.count));
   const total = days.reduce((sum, d) => sum + d.count, 0);
+  const label = (d: Date) =>
+    d.toLocaleDateString(undefined, { day: "numeric", month: "short" });
 
   return (
     <>
-      <p className="card-note">{total} in this window</p>
+      <p className="card-note">
+        {total === 0
+          ? "No notes in this window"
+          : `${total} note${total === 1 ? "" : "s"} · busiest day ${max}`}
+      </p>
       <div className="trend">
         {days.map((d) => (
           <span
-            key={d.date}
+            key={d.key}
             className={d.count > 0 ? "trend-bar" : "trend-bar empty"}
-            style={{ height: `${Math.max(2, (d.count / max) * 100)}%` }}
-            title={`${d.date}: ${d.count} note${d.count === 1 ? "" : "s"}`}
+            style={{
+              height: d.count > 0 ? `${(d.count / max) * 100}%` : "2px",
+            }}
+            title={`${label(d.date)}: ${d.count} note${d.count === 1 ? "" : "s"}`}
           />
         ))}
       </div>
       <div className="trend-axis">
-        <span>{days[0]?.date.slice(5)}</span>
+        <span>{days[0] ? label(days[0].date) : ""}</span>
         <span>today</span>
       </div>
     </>

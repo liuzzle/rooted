@@ -760,6 +760,10 @@ body {
   gap: 0.5rem;
   flex-wrap: wrap;
 }
+.reference-field {
+  min-width: 0;
+  flex: 1;
+}
 .reference-field input {
   font: inherit;
   font-size: 0.92rem;
@@ -769,7 +773,8 @@ body {
   background: var(--panel);
   color: var(--ink);
   flex: 1;
-  min-width: 12rem;
+  min-width: 7rem;
+  width: 100%;
 }
 .reference-field input.invalid {
   border-color: #a4442f;
@@ -804,6 +809,10 @@ body {
   border-radius: 10px;
   background: var(--panel);
   padding: 0.9rem 1rem 1rem;
+  /* Grid items are min-width:auto by default, so one long unbreakable line
+     (a verse rendered with `nowrap`) would stretch its track past the window
+     instead of ellipsing. Everything that lives in a grid track needs this. */
+  min-width: 0;
 }
 .card h3 {
   margin: 0 0 0.15rem;
@@ -815,6 +824,9 @@ body {
   color: var(--muted);
 }
 
+.dashboard > section {
+  min-width: 0;
+}
 .dash-top {
   display: grid;
   grid-template-columns: minmax(16rem, 1fr) 2fr;
@@ -846,6 +858,7 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: center;
+  min-width: 0;
 }
 .tile-value {
   font-size: 2rem;
@@ -874,6 +887,7 @@ body {
 .recent-item {
   display: block;
   width: 100%;
+  min-width: 0;
   text-align: left;
   font: inherit;
   border: none;
@@ -895,14 +909,19 @@ body {
   font-size: 0.78rem;
   font-weight: 700;
   color: var(--accent);
+  min-width: 0;
 }
+/* Two lines of a verse read; one clipped line doesn't. */
 .recent-body {
-  display: block;
-  font-size: 0.88rem;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
+  font-size: 0.88rem;
+  line-height: 1.35;
   color: var(--ink);
+  overflow-wrap: anywhere;
 }
 .swatch-dot {
   width: 10px;
@@ -933,6 +952,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--muted);
+  min-width: 0; /* else a long book name widens the whole row */
 }
 .bar-track {
   height: 10px;
