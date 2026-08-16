@@ -167,16 +167,232 @@ body {
   outline: 1px solid var(--accent);
 }
 
-.statusbar {
-  border-top: 1px solid var(--line);
-  padding: 0.5rem 1.5rem;
-  font-size: 0.85rem;
-  color: var(--ink);
-  background: var(--panel);
+/* Highlights (verse- or word-level) */
+.hl-yellow {
+  background: #fbf1b8;
 }
-.statusbar .hint {
+.hl-green {
+  background: #cfe9cf;
+}
+.hl-blue {
+  background: #cfe0f2;
+}
+.hl-pink {
+  background: #f7d4e0;
+}
+.hl-purple {
+  background: #e0d6f2;
+}
+.verse.hl-yellow,
+.verse.hl-green,
+.verse.hl-blue,
+.verse.hl-pink,
+.verse.hl-purple {
+  border-radius: 4px;
+  padding: 0 0.2rem;
+}
+
+/* "There is a note here" indicators */
+.note-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: super;
+  margin-right: 0.3rem;
+  cursor: pointer;
+}
+.word.has-note {
+  border-bottom: 2px dotted var(--accent);
+}
+
+/* Notes panel */
+.notes-panel {
+  width: 320px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border-left: 1px solid var(--line);
+  padding: 0.9rem 1rem 1rem;
+  overflow-y: auto;
+  font-size: 0.95rem;
+}
+.notes-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.notes-header h3 {
+  margin: 0.1rem 0 0;
+  font-size: 1.05rem;
+}
+.notes-kind {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.icon-btn {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.3rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.icon-btn:hover {
+  color: var(--ink);
+}
+
+.highlight-row {
+  margin: 0.9rem 0 0.4rem;
+}
+.field-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+.swatches {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+}
+.swatch {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid var(--line);
+  cursor: pointer;
+  padding: 0;
+}
+.swatch.none {
+  background: var(--panel);
+  position: relative;
+}
+.swatch.none::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-top: 1px solid var(--muted);
+  transform: rotate(-45deg);
+}
+.swatch.active {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.notes-list {
+  flex: 1;
+  margin-top: 0.6rem;
+}
+.notes-empty,
+.notes-error {
   color: var(--muted);
   font-style: italic;
+  font-size: 0.88rem;
+}
+.notes-error {
+  color: #a4442f;
+  font-style: normal;
+}
+.note {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem 0.7rem;
+  margin-bottom: 0.6rem;
+  background: var(--bg);
+}
+.note h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.98rem;
+}
+.note-body {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.note-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+.note-actions {
+  display: flex;
+  gap: 0.6rem;
+}
+.link-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0;
+  cursor: pointer;
+}
+.link-btn:hover {
+  text-decoration: underline;
+}
+
+.note-form {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0.6rem;
+  margin-bottom: 0.6rem;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+.note-form input,
+.note-form textarea {
+  font: inherit;
+  font-size: 0.92rem;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  resize: vertical;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.primary {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.32rem 0.8rem;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #f4efe6;
+  cursor: pointer;
+}
+.primary:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.add-note {
+  font: inherit;
+  font-size: 0.9rem;
+  padding: 0.45rem;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+}
+.add-note:hover {
+  background: var(--accent-soft);
 }
 
 .empty {

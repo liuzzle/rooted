@@ -1,18 +1,21 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Anchor,
   Book,
+  ChapterAnnotations,
   Translation,
   Verse,
+  anchorKey,
   getChapter,
+  getChapterAnnotations,
   listBooks,
   listTranslations,
+  verseAnchor,
+  wordAnchor,
 } from "../../lib/api";
+import NotesPanel from "../notes/NotesPanel";
 
-interface WordSelection {
-  verseId: string;
-  tokenIdx: number;
-  surface: string;
-}
+const EMPTY_ANNOTATIONS: ChapterAnnotations = { highlights: [], note_marks: [] };
 
 export default function Reader() {
   const [translations, setTranslations] = useState<Translation[]>([]);
@@ -21,8 +24,9 @@ export default function Reader() {
   const [bookOsis, setBookOsis] = useState<string | null>(null);
   const [chapter, setChapter] = useState(1);
   const [verses, setVerses] = useState<Verse[]>([]);
-  const [selected, setSelected] = useState<WordSelection | null>(null);
-  const [selectedVerse, setSelectedVerse] = useState<string | null>(null);
+  const [annotations, setAnnotations] =
+    useState<ChapterAnnotations>(EMPTY_ANNOTATIONS);
+  const [selection, setSelection] = useState<Anchor | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Load translations once.
@@ -55,6 +59,43 @@ export default function Reader() {
       .catch((e) => setError(String(e)));
   }, [translationId, bookOsis, chapter]);
 
+  const reloadAnnotations = useCallback(() => {
+    if (translationId == null || bookOsis == null) return;
+    getChapterAnnotations(translationId, bookOsis, chapter)
+      .then(setAnnotations)
+      .catch((e) => setError(String(e)));
+  }, [translationId, bookOsis, chapter]);
+
+  useEffect(reloadAnnotations, [reloadAnnotations]);
+
+  // Fast lookups keyed the same way anchors are, so a verse annotation matches
+  // by verse id alone and a word annotation by (verse id, token index).
+  const highlightByAnchor = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const h of annotations.highlights) {
+      m.set(
+        h.anchor_type === "word"
+          ? `w:${h.verse_id}:${h.token_idx}`
+          : `v:${h.verse_id}`,
+        h.color,
+      );
+    }
+    return m;
+  }, [annotations]);
+
+  const notesByAnchor = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const n of annotations.note_marks) {
+      m.set(
+        n.token_idx === null
+          ? `v:${n.verse_id}`
+          : `w:${n.verse_id}:${n.token_idx}`,
+        n.count,
+      );
+    }
+    return m;
+  }, [annotations]);
+
   const activeBook = useMemo(
     () => books.find((b) => b.osis === bookOsis) ?? null,
     [books, bookOsis],
@@ -66,9 +107,22 @@ export default function Reader() {
   function selectBook(osis: string) {
     setBookOsis(osis);
     setChapter(1);
-    setSelected(null);
-    setSelectedVerse(null);
+    setSelection(null);
   }
+
+  /** Clicking the same anchor twice closes the panel. */
+  function toggleSelection(anchor: Anchor) {
+    setSelection((cur) =>
+      cur && anchorKey(cur) === anchorKey(anchor) ? null : anchor,
+    );
+  }
+
+  const selectionLabel = useMemo(() => {
+    if (!selection) return "";
+    return selection.anchor_type === "word"
+      ? `“${selection.surface}” · ${selection.verse_id}`
+      : selection.verse_id;
+  }, [selection]);
 
   if (error) {
     return <div className="empty">Error: {error}</div>;
@@ -149,44 +203,61 @@ export default function Reader() {
         </header>
 
         <div className="verses">
-          {verses.map((v) => (
-            <p
-              key={v.verse_id}
-              className={selectedVerse === v.verse_id ? "verse selected" : "verse"}
-            >
-              <sup
-                className="vnum"
-                onClick={() =>
-                  setSelectedVerse(selectedVerse === v.verse_id ? null : v.verse_id)
-                }
-                title={v.verse_id}
+          {verses.map((v) => {
+            const vKey = `v:${v.verse_id}`;
+            const verseHl = highlightByAnchor.get(vKey);
+            const verseNotes = notesByAnchor.get(vKey) ?? 0;
+            const isSelected =
+              selection?.anchor_type === "verse" &&
+              selection.verse_id === v.verse_id;
+            return (
+              <p
+                key={v.verse_id}
+                className={[
+                  "verse",
+                  isSelected ? "selected" : "",
+                  verseHl ? `hl-${verseHl}` : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               >
-                {v.verse}
-              </sup>
-              <VerseText
-                verse={v}
-                selected={selected}
-                onWord={(tokenIdx, surface) =>
-                  setSelected(
-                    selected?.verseId === v.verse_id && selected?.tokenIdx === tokenIdx
-                      ? null
-                      : { verseId: v.verse_id, tokenIdx, surface },
-                  )
-                }
-              />
-            </p>
-          ))}
+                <sup
+                  className="vnum"
+                  onClick={() => toggleSelection(verseAnchor(v.verse_id))}
+                  title={v.verse_id}
+                >
+                  {v.verse}
+                </sup>
+                {verseNotes > 0 && (
+                  <span
+                    className="note-dot"
+                    title={`${verseNotes} verse note${verseNotes > 1 ? "s" : ""}`}
+                    onClick={() => toggleSelection(verseAnchor(v.verse_id))}
+                  />
+                )}
+                <VerseText
+                  verse={v}
+                  translationId={translationId!}
+                  selection={selection}
+                  highlightByAnchor={highlightByAnchor}
+                  notesByAnchor={notesByAnchor}
+                  onWord={toggleSelection}
+                />
+              </p>
+            );
+          })}
         </div>
-
-        {(selected || selectedVerse) && (
-          <footer className="statusbar">
-            {selected
-              ? `Word selected: "${selected.surface}" — ${selected.verseId} · token ${selected.tokenIdx}`
-              : `Verse selected: ${selectedVerse}`}
-            <span className="hint"> (notes & highlights arrive in Phase 1)</span>
-          </footer>
-        )}
       </main>
+
+      {selection && (
+        <NotesPanel
+          anchor={selection}
+          label={selectionLabel}
+          highlight={highlightByAnchor.get(anchorKey(selection)) ?? null}
+          onChanged={reloadAnnotations}
+          onClose={() => setSelection(null)}
+        />
+      )}
     </div>
   );
 }
@@ -198,12 +269,18 @@ export default function Reader() {
  */
 function VerseText({
   verse,
-  selected,
+  translationId,
+  selection,
+  highlightByAnchor,
+  notesByAnchor,
   onWord,
 }: {
   verse: Verse;
-  selected: WordSelection | null;
-  onWord: (tokenIdx: number, surface: string) => void;
+  translationId: number;
+  selection: Anchor | null;
+  highlightByAnchor: Map<string, string>;
+  notesByAnchor: Map<string, number>;
+  onWord: (anchor: Anchor) => void;
 }) {
   const { text, tokens } = verse;
   const parts: React.ReactNode[] = [];
@@ -213,13 +290,27 @@ function VerseText({
     if (tok.char_start > cursor) {
       parts.push(<span key={`gap-${cursor}`}>{text.slice(cursor, tok.char_start)}</span>);
     }
+    const key = `w:${verse.verse_id}:${tok.idx}`;
     const isSel =
-      selected?.verseId === verse.verse_id && selected?.tokenIdx === tok.idx;
+      selection?.anchor_type === "word" &&
+      selection.verse_id === verse.verse_id &&
+      selection.token_idx === tok.idx;
+    const hl = highlightByAnchor.get(key);
+    const hasNote = (notesByAnchor.get(key) ?? 0) > 0;
     parts.push(
       <span
         key={`tok-${tok.idx}`}
-        className={isSel ? "word selected" : "word"}
-        onClick={() => onWord(tok.idx, tok.surface)}
+        className={[
+          "word",
+          isSel ? "selected" : "",
+          hl ? `hl-${hl}` : "",
+          hasNote ? "has-note" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        onClick={() =>
+          onWord(wordAnchor(verse.verse_id, translationId, tok.idx, tok.surface))
+        }
       >
         {text.slice(tok.char_start, tok.char_end)}
       </span>,
