@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 export interface Translation {
   id: number;
@@ -71,6 +72,10 @@ export interface Note {
   translation_id: number | null;
   token_idx: number | null;
   surface: string | null;
+  /** Translation a word note was written in. */
+  origin_abbrev: string | null;
+  /** Word note shown at verse level because we're in another translation. */
+  degraded: boolean;
 }
 
 export interface Highlight {
@@ -84,8 +89,10 @@ export interface Highlight {
 
 export interface NoteMark {
   verse_id: string;
-  token_idx: number | null; // null = verse-level note
+  token_idx: number | null; // null = verse-level indicator
   count: number;
+  /** Word notes from other translations, shown on the verse instead. */
+  degraded: number;
 }
 
 export interface ChapterAnnotations {
@@ -118,8 +125,15 @@ export function anchorKey(anchor: Anchor): string {
     : `v:${anchor.verse_id}`;
 }
 
-export function listNotes(anchor: Anchor): Promise<Note[]> {
-  return invoke("list_notes", { anchor });
+/**
+ * Notes at this anchor. `translationId` is the translation being read: word
+ * notes made in a *different* one come back on the verse, flagged `degraded`.
+ */
+export function listNotes(
+  anchor: Anchor,
+  translationId: number,
+): Promise<Note[]> {
+  return invoke("list_notes", { anchor, translationId });
 }
 
 export function createNote(
@@ -156,4 +170,56 @@ export function getChapterAnnotations(
   chapter: number,
 ): Promise<ChapterAnnotations> {
   return invoke("get_chapter_annotations", { translationId, bookOsis, chapter });
+}
+
+// --- translation packs -----------------------------------------------------
+
+export interface Pack {
+  abbrev: string;
+  name: string;
+  slug: string;
+  language: string;
+  license: string;
+  year: string;
+  versification: string;
+  blurb: string;
+  installed: boolean;
+  translation_id: number | null;
+  verse_count: number;
+}
+
+export interface PackProgress {
+  abbrev: string;
+  book: number;
+  total: number;
+  book_name: string;
+  verses: number;
+}
+
+export function listPacks(): Promise<Pack[]> {
+  return invoke("list_packs");
+}
+
+/** Downloads and imports a pack; emits `pack-progress` per book. */
+export function installPack(abbrev: string): Promise<number> {
+  return invoke("install_pack", { abbrev });
+}
+
+export function removePack(abbrev: string): Promise<void> {
+  return invoke("remove_pack", { abbrev });
+}
+
+export function getActiveTranslation(): Promise<string | null> {
+  return invoke("get_active_translation");
+}
+
+export function setActiveTranslation(abbrev: string): Promise<void> {
+  return invoke("set_active_translation", { abbrev });
+}
+
+/** Subscribe to install progress. Resolves to an unlisten function. */
+export function onPackProgress(
+  handler: (p: PackProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<PackProgress>("pack-progress", (e) => handler(e.payload));
 }
