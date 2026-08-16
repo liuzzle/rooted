@@ -904,8 +904,11 @@ pub fn stats(conn: &Connection) -> Result<Stats, String> {
 
     let mut stmt = conn
         .prepare(
-            "SELECT date(created_at), COUNT(*) FROM notes
-              WHERE created_at >= date('now', '-29 days')
+            // Local days, not UTC ones: a note written at 23:30 belongs to the
+            // day the user wrote it, not to tomorrow.
+            "SELECT date(created_at, 'localtime'), COUNT(*) FROM notes
+              WHERE datetime(created_at, 'localtime')
+                    >= date('now', 'localtime', '-29 days')
               GROUP BY 1 ORDER BY 1",
         )
         .map_err(|e| e.to_string())?;
