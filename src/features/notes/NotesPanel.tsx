@@ -25,6 +25,8 @@ export default function NotesPanel({
   translationId,
   label,
   highlight,
+  verseNoteCount,
+  onShowVerse,
   onChanged,
   onClose,
 }: {
@@ -33,6 +35,9 @@ export default function NotesPanel({
   translationId: number;
   label: string;
   highlight: string | null;
+  /** Notes on this verse, so a word view can point at them. */
+  verseNoteCount: number;
+  onShowVerse: () => void;
   onChanged: () => void;
   onClose: () => void;
 }) {
@@ -149,9 +154,17 @@ export default function NotesPanel({
 
       {error && <p className="notes-error">{error}</p>}
 
+      {anchor.anchor_type === "word" && verseNoteCount > 0 && (
+        <button className="verse-notes-link" onClick={onShowVerse}>
+          {verseNoteCount} note{verseNoteCount > 1 ? "s" : ""} on this verse →
+        </button>
+      )}
+
       <div className="notes-list">
         {notes.length === 0 && editing !== "new" && (
-          <p className="notes-empty">No notes here yet.</p>
+          <p className="notes-empty">
+            No notes on this {anchor.anchor_type} yet.
+          </p>
         )}
 
         {notes.map((n) =>

@@ -142,13 +142,17 @@ export default function Reader() {
   }
 
   /**
-   * Switch translations and remember the choice. A word selection is dropped:
-   * word anchors belong to the translation they were made in, so the same
-   * token index in another text is a different word.
+   * Switch translations and remember the choice.
+   *
+   * A word selection falls back to its verse rather than disappearing: the same
+   * token index in another text is a different word, but the notes written on
+   * that word are still about this verse — and that's where they now live.
    */
   function switchTranslation(id: number) {
     setTranslationId(id);
-    setSelection((cur) => (cur?.anchor_type === "word" ? null : cur));
+    setSelection((cur) =>
+      cur?.anchor_type === "word" ? verseAnchor(cur.verse_id) : cur,
+    );
     const abbrev = translations.find((t) => t.id === id)?.abbrev;
     if (abbrev) setActiveTranslation(abbrev).catch((e) => setError(String(e)));
   }
@@ -316,6 +320,8 @@ export default function Reader() {
           translationId={translationId}
           label={selectionLabel}
           highlight={highlightByAnchor.get(anchorKey(selection)) ?? null}
+          verseNoteCount={verseNoteCount(notesByAnchor, selection.verse_id)}
+          onShowVerse={() => setSelection(verseAnchor(selection.verse_id))}
           onChanged={reloadAnnotations}
           onClose={() => setSelection(null)}
         />
@@ -335,6 +341,15 @@ export default function Reader() {
       )}
     </div>
   );
+}
+
+/** How many notes sit on the verse itself (including degraded word notes). */
+function verseNoteCount(
+  marks: Map<string, { count: number; degraded: number }>,
+  verseId: string,
+): number {
+  const mark = marks.get(`v:${verseId}`);
+  return mark ? mark.count + mark.degraded : 0;
 }
 
 function noteDotTitle({

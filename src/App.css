@@ -195,13 +195,17 @@ body {
 /* "There is a note here" indicators */
 .note-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   background: var(--accent);
   vertical-align: super;
-  margin-right: 0.3rem;
+  margin-right: 0.35rem;
   cursor: pointer;
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.note-dot:hover {
+  box-shadow: 0 0 0 3px var(--select);
 }
 .word.has-note {
   border-bottom: 2px dotted var(--accent);
@@ -406,8 +410,28 @@ body {
   color: var(--muted);
 }
 .note-dot.degraded {
-  background: transparent;
-  border: 1.5px solid var(--accent);
+  background: var(--panel);
+  border: 2px solid var(--accent);
+  width: 9px;
+  height: 9px;
+}
+
+.verse-notes-link {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  font-size: 0.85rem;
+  margin-top: 0.7rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+}
+.verse-notes-link:hover {
+  background: var(--select);
 }
 
 /* Translation packs */
