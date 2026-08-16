@@ -324,7 +324,7 @@ function NotesTrend({ counts }: { counts: { key: string; count: number }[] }) {
         {days.map((d) => (
           <span
             key={d.key}
-            className={d.count > 0 ? "trend-bar" : "trend-bar empty"}
+            className={d.count > 0 ? "trend-bar" : "trend-bar blank"}
             style={{
               height: d.count > 0 ? `${(d.count / max) * 100}%` : "2px",
             }}

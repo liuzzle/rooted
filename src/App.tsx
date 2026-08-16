@@ -128,10 +128,10 @@ export default function App() {
         </div>
       </div>
 
-      {error && <div className="empty">Error: {error}</div>}
+      {error && <div className="empty-state">Error: {error}</div>}
 
       {!error && loaded && translations.length === 0 && (
-        <div className="empty">
+        <div className="empty-state">
           <h2>No Bible installed yet</h2>
           <p>Download a translation to start reading.</p>
           <button className="primary" onClick={() => setShowPacks(true)}>

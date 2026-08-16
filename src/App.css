@@ -988,7 +988,7 @@ body {
   border-radius: 3px 3px 0 0;
   min-height: 2px;
 }
-.trend-bar.empty {
+.trend-bar.blank {
   background: var(--line);
 }
 .trend-axis {
@@ -1043,13 +1043,13 @@ body {
   border-radius: 0 3px 3px 0;
 }
 
-.empty {
+.empty-state {
   margin: auto;
   text-align: center;
   color: var(--muted);
   padding: 3rem;
 }
-.empty pre {
+.empty-state pre {
   display: inline-block;
   background: var(--panel);
   border: 1px solid var(--line);
