@@ -1,13 +1,18 @@
 mod db;
 mod packs;
 
-use db::{Anchor, Book, ChapterAnnotations, Db, Note, Translation, Verse};
+use db::{
+    Anchor, Book, ChapterAnnotations, Db, LibraryNote, Note, RecentHighlight, Stats, Translation,
+    Verse,
+};
 use packs::Pack;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 /// Key under which the reader's current translation is remembered.
 const ACTIVE_TRANSLATION: &str = "active_translation";
+/// Key under which the last chapter read is remembered (`"Gen.1"`).
+const LAST_READ: &str = "last_read";
 
 #[tauri::command]
 fn list_translations(state: State<Db>) -> Result<Vec<Translation>, String> {
@@ -37,12 +42,23 @@ fn get_chapter(
 #[tauri::command]
 fn create_note(
     state: State<Db>,
-    anchor: Anchor,
+    anchor: Option<Anchor>,
     title: Option<String>,
     body: String,
 ) -> Result<i64, String> {
     let mut conn = state.0.lock().map_err(|e| e.to_string())?;
     db::create_note(&mut conn, anchor, title, body)
+}
+
+/// Attach a reference to a note, move it, or drop it (`anchor: null`).
+#[tauri::command]
+fn set_note_anchor(
+    state: State<Db>,
+    note_id: i64,
+    anchor: Option<Anchor>,
+) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_note_anchor(&mut conn, note_id, anchor)
 }
 
 #[tauri::command]
@@ -93,6 +109,60 @@ fn get_chapter_annotations(
 ) -> Result<ChapterAnnotations, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::chapter_annotations(&conn, translation_id, &book_osis, chapter)
+}
+
+// --- study surfaces --------------------------------------------------------
+
+#[tauri::command]
+fn list_all_notes(
+    state: State<Db>,
+    translation_id: i64,
+    book_osis: Option<String>,
+    query: Option<String>,
+    limit: i64,
+) -> Result<Vec<LibraryNote>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::list_all_notes(&conn, translation_id, book_osis, query, limit)
+}
+
+#[tauri::command]
+fn list_chapter_notes(
+    state: State<Db>,
+    translation_id: i64,
+    book_osis: String,
+    chapter: i64,
+) -> Result<Vec<LibraryNote>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::list_chapter_notes(&conn, translation_id, &book_osis, chapter)
+}
+
+#[tauri::command]
+fn list_recent_highlights(
+    state: State<Db>,
+    translation_id: i64,
+    limit: i64,
+) -> Result<Vec<RecentHighlight>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::list_recent_highlights(&conn, translation_id, limit)
+}
+
+#[tauri::command]
+fn get_stats(state: State<Db>) -> Result<Stats, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::stats(&conn)
+}
+
+/// Last chapter read, as `"Gen.1"`.
+#[tauri::command]
+fn get_last_read(state: State<Db>) -> Result<Option<String>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::get_setting(&conn, LAST_READ)
+}
+
+#[tauri::command]
+fn set_last_read(state: State<Db>, position: String) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_setting(&conn, LAST_READ, &position)
 }
 
 // --- translation packs -----------------------------------------------------
@@ -211,7 +281,14 @@ pub fn run() {
             install_pack,
             remove_pack,
             get_active_translation,
-            set_active_translation
+            set_active_translation,
+            set_note_anchor,
+            list_all_notes,
+            list_chapter_notes,
+            list_recent_highlights,
+            get_stats,
+            get_last_read,
+            set_last_read
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

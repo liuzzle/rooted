@@ -315,14 +315,17 @@ pub struct ChapterAnnotations {
     pub note_marks: Vec<NoteMark>,
 }
 
-/// Create a note and its anchor in one transaction. Returns the new note id.
+/// Create a note, optionally anchored, in one transaction. Returns the new id.
+///
+/// `anchor: None` is a standalone note — a general study note with no scripture
+/// reference yet. [`set_note_anchor`] can give it one later.
 pub fn create_note(
     conn: &mut Connection,
-    anchor: Anchor,
+    anchor: Option<Anchor>,
     title: Option<String>,
     body: String,
 ) -> Result<i64, String> {
-    let anchor = anchor.normalized()?;
+    let anchor = anchor.map(Anchor::normalized).transpose()?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO notes (title, body) VALUES (?1, ?2)",
@@ -330,7 +333,15 @@ pub fn create_note(
     )
     .map_err(|e| e.to_string())?;
     let note_id = tx.last_insert_rowid();
-    tx.execute(
+    if let Some(anchor) = anchor {
+        insert_anchor(&tx, note_id, &anchor)?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(note_id)
+}
+
+fn insert_anchor(conn: &Connection, note_id: i64, anchor: &Anchor) -> Result<(), String> {
+    conn.execute(
         "INSERT INTO note_anchors
            (note_id, anchor_type, verse_id, translation_id, token_idx, surface)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -343,9 +354,43 @@ pub fn create_note(
             anchor.surface,
         ],
     )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
+}
+
+/// Point a note at a reference, move it, or (with `None`) unanchor it.
+pub fn set_note_anchor(
+    conn: &mut Connection,
+    note_id: i64,
+    anchor: Option<Anchor>,
+) -> Result<(), String> {
+    let anchor = anchor.map(Anchor::normalized).transpose()?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM notes WHERE note_id = ?1",
+            rusqlite::params![note_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        return Err(format!("note {note_id} not found"));
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM note_anchors WHERE note_id = ?1",
+        rusqlite::params![note_id],
+    )
     .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
-    Ok(note_id)
+    if let Some(anchor) = anchor {
+        insert_anchor(&tx, note_id, &anchor)?;
+    }
+    tx.execute(
+        "UPDATE notes SET updated_at = datetime('now') WHERE note_id = ?1",
+        rusqlite::params![note_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 pub fn update_note(
@@ -578,6 +623,317 @@ pub fn chapter_annotations(
 }
 
 // ---------------------------------------------------------------------------
+// Study surfaces: library, chapter notes, stats (Phase 2.5)
+// ---------------------------------------------------------------------------
+
+/// Where a note sits, resolved for display.
+#[derive(Serialize)]
+pub struct AnchorInfo {
+    pub anchor_type: String,
+    pub verse_id: String,
+    pub book_osis: String,
+    pub book_name: Option<String>,
+    pub chapter: i64,
+    pub verse: i64,
+    pub translation_id: Option<i64>,
+    pub token_idx: Option<i64>,
+    pub surface: Option<String>,
+    pub origin_abbrev: Option<String>,
+    pub degraded: bool,
+}
+
+/// A note as the library and chapter list show it: `anchor` is `None` for a
+/// standalone note that has no scripture reference (yet).
+#[derive(Serialize)]
+pub struct LibraryNote {
+    pub note_id: i64,
+    pub title: Option<String>,
+    pub body: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub anchor: Option<AnchorInfo>,
+}
+
+const LIBRARY_COLUMNS: &str = "SELECT n.note_id, n.title, n.body, n.created_at, n.updated_at,
+            a.anchor_type, a.verse_id, a.translation_id, a.token_idx, a.surface,
+            t.abbrev, b.name
+       FROM notes n
+       LEFT JOIN note_anchors a ON a.note_id = n.note_id
+       LEFT JOIN translations t ON t.id = a.translation_id
+       LEFT JOIN books b ON b.osis = substr(a.verse_id, 1, instr(a.verse_id, '.') - 1)";
+
+fn map_library_note(r: &rusqlite::Row, active_translation_id: i64) -> rusqlite::Result<LibraryNote> {
+    let anchor_type: Option<String> = r.get(5)?;
+    let verse_id: Option<String> = r.get(6)?;
+    let anchor = match (anchor_type, verse_id) {
+        (Some(anchor_type), Some(verse_id)) => {
+            let translation_id: Option<i64> = r.get(7)?;
+            let (book_osis, chapter, verse) = split_verse_id(&verse_id);
+            Some(AnchorInfo {
+                degraded: anchor_type == "word" && translation_id != Some(active_translation_id),
+                anchor_type,
+                verse_id,
+                book_osis,
+                book_name: r.get(11)?,
+                chapter,
+                verse,
+                translation_id,
+                token_idx: r.get(8)?,
+                surface: r.get(9)?,
+                origin_abbrev: r.get(10)?,
+            })
+        }
+        _ => None,
+    };
+    Ok(LibraryNote {
+        note_id: r.get(0)?,
+        title: r.get(1)?,
+        body: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+        anchor,
+    })
+}
+
+/// `Gen.1.5` -> `("Gen", 1, 5)`. Malformed ids degrade to zeros rather than
+/// failing the whole listing.
+fn split_verse_id(verse_id: &str) -> (String, i64, i64) {
+    let mut parts = verse_id.split('.');
+    let book = parts.next().unwrap_or_default().to_string();
+    let chapter = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
+    let verse = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    (book, chapter, verse)
+}
+
+/// Every note, newest first — the notes library.
+///
+/// `book_osis` filters to one book; `query` matches note title or body. Notes
+/// with no anchor are included unless a book filter is set.
+pub fn list_all_notes(
+    conn: &Connection,
+    active_translation_id: i64,
+    book_osis: Option<String>,
+    query: Option<String>,
+    limit: i64,
+) -> Result<Vec<LibraryNote>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{LIBRARY_COLUMNS}
+              WHERE (?1 IS NULL OR a.verse_id LIKE ?1 || '.%')
+                AND (?2 IS NULL OR n.body LIKE '%' || ?2 || '%'
+                     OR n.title LIKE '%' || ?2 || '%')
+              ORDER BY n.created_at DESC, n.note_id DESC
+              LIMIT ?3"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![book_osis, query, limit], |r| {
+            map_library_note(r, active_translation_id)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|e| e.to_string())
+}
+
+/// Notes on one chapter, in verse order — including word notes written in
+/// another translation, which belong to the verse here.
+pub fn list_chapter_notes(
+    conn: &Connection,
+    translation_id: i64,
+    book_osis: &str,
+    chapter: i64,
+) -> Result<Vec<LibraryNote>, String> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "{LIBRARY_COLUMNS}
+               JOIN verses v ON v.verse_id = a.verse_id AND v.translation_id = ?1
+              WHERE v.book_osis = ?2 AND v.chapter = ?3
+              ORDER BY v.verse, a.token_idx, n.created_at"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![translation_id, book_osis, chapter], |r| {
+            map_library_note(r, translation_id)
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct RecentHighlight {
+    pub id: i64,
+    pub anchor_type: String,
+    pub verse_id: String,
+    pub book_name: Option<String>,
+    pub chapter: i64,
+    pub verse: i64,
+    pub color: String,
+    pub surface: Option<String>,
+    /// Verse text in the translation being read, when it has that verse.
+    pub text: Option<String>,
+    pub created_at: String,
+}
+
+pub fn list_recent_highlights(
+    conn: &Connection,
+    translation_id: i64,
+    limit: i64,
+) -> Result<Vec<RecentHighlight>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT h.id, h.anchor_type, h.verse_id, b.name, h.color, h.surface,
+                    v.text, h.created_at
+               FROM highlights h
+               LEFT JOIN books b
+                 ON b.osis = substr(h.verse_id, 1, instr(h.verse_id, '.') - 1)
+               LEFT JOIN verses v
+                 ON v.verse_id = h.verse_id AND v.translation_id = ?1
+              ORDER BY h.created_at DESC, h.id DESC
+              LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![translation_id, limit], |r| {
+            let verse_id: String = r.get(2)?;
+            let (_, chapter, verse) = split_verse_id(&verse_id);
+            Ok(RecentHighlight {
+                id: r.get(0)?,
+                anchor_type: r.get(1)?,
+                verse_id,
+                book_name: r.get(3)?,
+                chapter,
+                verse,
+                color: r.get(4)?,
+                surface: r.get(5)?,
+                text: r.get(6)?,
+                created_at: r.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+pub struct Count {
+    pub key: String,
+    pub label: Option<String>,
+    pub count: i64,
+}
+
+#[derive(Serialize)]
+pub struct Stats {
+    pub notes_total: i64,
+    pub notes_standalone: i64,
+    pub highlights_total: i64,
+    pub translations_installed: i64,
+    /// Distinct books carrying a note or highlight, out of 66.
+    pub books_annotated: i64,
+    pub by_book: Vec<Count>,
+    pub by_color: Vec<Count>,
+    /// Notes per day for the last 30 days; days with none are omitted.
+    pub notes_by_day: Vec<Count>,
+}
+
+pub fn stats(conn: &Connection) -> Result<Stats, String> {
+    let scalar = |sql: &str| -> Result<i64, String> {
+        conn.query_row(sql, [], |r| r.get(0)).map_err(|e| e.to_string())
+    };
+
+    let notes_total = scalar("SELECT COUNT(*) FROM notes")?;
+    let notes_standalone = scalar(
+        "SELECT COUNT(*) FROM notes n
+          WHERE NOT EXISTS (SELECT 1 FROM note_anchors a WHERE a.note_id = n.note_id)",
+    )?;
+    let highlights_total = scalar("SELECT COUNT(*) FROM highlights")?;
+    let translations_installed = scalar(
+        "SELECT COUNT(*) FROM translations t
+          WHERE EXISTS (SELECT 1 FROM verses v WHERE v.translation_id = t.id)",
+    )?;
+
+    // Books carrying any annotation, notes and highlights pooled.
+    let annotated_books = "SELECT substr(verse_id, 1, instr(verse_id, '.') - 1) AS osis
+                             FROM note_anchors
+                            UNION ALL
+                           SELECT substr(verse_id, 1, instr(verse_id, '.') - 1)
+                             FROM highlights";
+    let books_annotated = scalar(&format!(
+        "SELECT COUNT(DISTINCT osis) FROM ({annotated_books})"
+    ))?;
+
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT x.osis, b.name, COUNT(*)
+               FROM ({annotated_books}) x
+               LEFT JOIN books b ON b.osis = x.osis
+              GROUP BY x.osis
+              ORDER BY COUNT(*) DESC, b.canonical_order
+              LIMIT 8"
+        ))
+        .map_err(|e| e.to_string())?;
+    let by_book = stmt
+        .query_map([], |r| {
+            Ok(Count {
+                key: r.get(0)?,
+                label: r.get(1)?,
+                count: r.get(2)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT color, COUNT(*) FROM highlights
+              GROUP BY color ORDER BY COUNT(*) DESC",
+        )
+        .map_err(|e| e.to_string())?;
+    let by_color = stmt
+        .query_map([], |r| {
+            Ok(Count {
+                key: r.get(0)?,
+                label: None,
+                count: r.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT date(created_at), COUNT(*) FROM notes
+              WHERE created_at >= date('now', '-29 days')
+              GROUP BY 1 ORDER BY 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let notes_by_day = stmt
+        .query_map([], |r| {
+            Ok(Count {
+                key: r.get(0)?,
+                label: None,
+                count: r.get(1)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(Stats {
+        notes_total,
+        notes_standalone,
+        highlights_total,
+        translations_installed,
+        books_annotated,
+        by_book,
+        by_color,
+        notes_by_day,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -630,7 +986,7 @@ mod tests {
     #[test]
     fn note_crud_round_trips() {
         let mut conn = fixture();
-        let id = create_note(&mut conn, verse("Gen.1.1"), Some("Origins".into()), "body".into())
+        let id = create_note(&mut conn, Some(verse("Gen.1.1")), Some("Origins".into()), "body".into())
             .unwrap();
 
         let notes = list_notes(&conn, verse("Gen.1.1"), 1).unwrap();
@@ -660,7 +1016,7 @@ mod tests {
             translation_id: Some(1),
             ..verse("Gen.1.1")
         };
-        create_note(&mut conn, anchor, None, "shared".into()).unwrap();
+        create_note(&mut conn, Some(anchor), None, "shared".into()).unwrap();
 
         let stored: Option<i64> = conn
             .query_row("SELECT translation_id FROM note_anchors", [], |r| r.get(0))
@@ -678,7 +1034,7 @@ mod tests {
         let mut conn = fixture();
         create_note(
             &mut conn,
-            word("Gen.1.1", 1, 2, "beginning"),
+            Some(word("Gen.1.1", 1, 2, "beginning")),
             None,
             "on the word".into(),
         )
@@ -707,12 +1063,12 @@ mod tests {
         let mut conn = fixture();
         create_note(
             &mut conn,
-            word("Gen.1.1", 1, 2, "beginning"),
+            Some(word("Gen.1.1", 1, 2, "beginning")),
             None,
             "on the word".into(),
         )
         .unwrap();
-        create_note(&mut conn, verse("Gen.1.1"), None, "on the verse".into()).unwrap();
+        create_note(&mut conn, Some(verse("Gen.1.1")), None, "on the verse".into()).unwrap();
 
         // Reading KJV: the WEB word note must not point at any KJV word.
         let marks = chapter_annotations(&conn, 2, "Gen", 1).unwrap().note_marks;
@@ -753,6 +1109,156 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM translations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 2, "the translation row itself must survive");
+    }
+
+    #[test]
+    fn library_lists_anchored_and_standalone_notes() {
+        let mut conn = fixture();
+        create_note(&mut conn, None, Some("Covenant".into()), "a theme".into()).unwrap();
+        create_note(
+            &mut conn,
+            Some(word("Gen.1.1", 1, 2, "beginning")),
+            None,
+            "on a word".into(),
+        )
+        .unwrap();
+        create_note(&mut conn, Some(verse("Gen.1.2")), None, "on a verse".into()).unwrap();
+
+        let all = list_all_notes(&conn, 1, None, None, 50).unwrap();
+        assert_eq!(all.len(), 3);
+        // Newest first.
+        assert_eq!(all[0].body, "on a verse");
+
+        let standalone = all.iter().find(|n| n.body == "a theme").unwrap();
+        assert!(standalone.anchor.is_none());
+        assert_eq!(standalone.title.as_deref(), Some("Covenant"));
+
+        let anchored = all.iter().find(|n| n.body == "on a word").unwrap();
+        let anchor = anchored.anchor.as_ref().unwrap();
+        assert_eq!(anchor.book_osis, "Gen");
+        assert_eq!(anchor.book_name.as_deref(), Some("Genesis"));
+        assert_eq!((anchor.chapter, anchor.verse), (1, 1));
+        assert_eq!(anchor.surface.as_deref(), Some("beginning"));
+        assert!(!anchor.degraded);
+
+        // Same note read from KJV: still listed, now flagged.
+        let from_kjv = list_all_notes(&conn, 2, None, None, 50).unwrap();
+        let anchored = from_kjv.iter().find(|n| n.body == "on a word").unwrap();
+        assert!(anchored.anchor.as_ref().unwrap().degraded);
+    }
+
+    #[test]
+    fn library_filters_by_book_and_text() {
+        let mut conn = fixture();
+        create_note(&mut conn, Some(verse("Gen.1.1")), None, "creation".into()).unwrap();
+        create_note(&mut conn, Some(verse("Exod.1.1")), None, "exodus note".into()).unwrap();
+        create_note(&mut conn, None, None, "unanchored creation thought".into()).unwrap();
+
+        let gen = list_all_notes(&conn, 1, Some("Gen".into()), None, 50).unwrap();
+        assert_eq!(gen.len(), 1, "'Gen' must not also match 'Exod' or unanchored");
+        assert_eq!(gen[0].body, "creation");
+
+        let found = list_all_notes(&conn, 1, None, Some("creation".into()), 50).unwrap();
+        assert_eq!(found.len(), 2, "matches anchored and standalone bodies");
+
+        assert!(list_all_notes(&conn, 1, None, Some("nothing here".into()), 50)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn chapter_notes_come_back_in_verse_order() {
+        let mut conn = fixture();
+        create_note(&mut conn, Some(verse("Gen.1.2")), None, "second".into()).unwrap();
+        create_note(&mut conn, Some(verse("Gen.1.1")), None, "first".into()).unwrap();
+        create_note(
+            &mut conn,
+            Some(word("Gen.1.1", 1, 2, "beginning")),
+            None,
+            "on a word".into(),
+        )
+        .unwrap();
+        // Another chapter must not leak in.
+        create_note(&mut conn, Some(verse("Gen.2.1")), None, "elsewhere".into()).unwrap();
+
+        let notes = list_chapter_notes(&conn, 1, "Gen", 1).unwrap();
+        let bodies: Vec<&str> = notes.iter().map(|n| n.body.as_str()).collect();
+        assert_eq!(bodies, vec!["first", "on a word", "second"]);
+
+        // Reading KJV, the WEB word note still belongs to this chapter, flagged.
+        let notes = list_chapter_notes(&conn, 2, "Gen", 1).unwrap();
+        let word_note = notes.iter().find(|n| n.body == "on a word").unwrap();
+        assert!(word_note.anchor.as_ref().unwrap().degraded);
+    }
+
+    #[test]
+    fn anchors_can_be_attached_moved_and_dropped() {
+        let mut conn = fixture();
+        let id = create_note(&mut conn, None, None, "later".into()).unwrap();
+        assert!(list_all_notes(&conn, 1, None, None, 10).unwrap()[0]
+            .anchor
+            .is_none());
+
+        set_note_anchor(&mut conn, id, Some(verse("Gen.1.1"))).unwrap();
+        let anchor = list_all_notes(&conn, 1, None, None, 10).unwrap()[0]
+            .anchor
+            .as_ref()
+            .map(|a| a.verse_id.clone());
+        assert_eq!(anchor.as_deref(), Some("Gen.1.1"));
+
+        // Moving replaces rather than accumulating.
+        set_note_anchor(&mut conn, id, Some(verse("Gen.1.2"))).unwrap();
+        let all = list_all_notes(&conn, 1, None, None, 10).unwrap();
+        assert_eq!(all.len(), 1, "one row per note, not one per old anchor");
+        assert_eq!(all[0].anchor.as_ref().unwrap().verse_id, "Gen.1.2");
+
+        set_note_anchor(&mut conn, id, None).unwrap();
+        assert!(list_all_notes(&conn, 1, None, None, 10).unwrap()[0]
+            .anchor
+            .is_none());
+
+        assert!(set_note_anchor(&mut conn, 999, None).is_err());
+    }
+
+    #[test]
+    fn stats_summarise_notes_and_highlights() {
+        let mut conn = fixture();
+        create_note(&mut conn, Some(verse("Gen.1.1")), None, "a".into()).unwrap();
+        create_note(&mut conn, Some(verse("Gen.1.2")), None, "b".into()).unwrap();
+        create_note(&mut conn, None, None, "loose".into()).unwrap();
+        set_highlight(&mut conn, verse("Gen.1.1"), "yellow".into()).unwrap();
+        set_highlight(&mut conn, verse("Gen.1.2"), "yellow".into()).unwrap();
+        set_highlight(&mut conn, word("Gen.1.1", 1, 0, "In"), "green".into()).unwrap();
+
+        let s = stats(&conn).unwrap();
+        assert_eq!(s.notes_total, 3);
+        assert_eq!(s.notes_standalone, 1);
+        assert_eq!(s.highlights_total, 3);
+        assert_eq!(s.translations_installed, 2);
+        assert_eq!(s.books_annotated, 1);
+        assert_eq!(s.by_book[0].key, "Gen");
+        assert_eq!(s.by_book[0].label.as_deref(), Some("Genesis"));
+        assert_eq!(s.by_book[0].count, 5, "notes and highlights pooled");
+        assert_eq!(s.by_color[0].key, "yellow");
+        assert_eq!(s.by_color[0].count, 2);
+        assert_eq!(s.notes_by_day.iter().map(|d| d.count).sum::<i64>(), 3);
+    }
+
+    #[test]
+    fn recent_highlights_carry_their_verse_text() {
+        let mut conn = fixture();
+        set_highlight(&mut conn, verse("Gen.1.2"), "pink".into()).unwrap();
+
+        let recent = list_recent_highlights(&conn, 1, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].book_name.as_deref(), Some("Genesis"));
+        assert_eq!((recent[0].chapter, recent[0].verse), (1, 2));
+        assert_eq!(recent[0].text.as_deref(), Some("The earth was formless"));
+
+        // KJV has no Gen.1.2 in this fixture: the highlight still lists, textless.
+        let recent = list_recent_highlights(&conn, 2, 10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].text, None);
     }
 
     #[test]
@@ -806,13 +1312,13 @@ mod tests {
             token_idx: None,
             ..word("Gen.1.1", 1, 0, "In")
         };
-        assert!(create_note(&mut conn, no_token, None, "x".into()).is_err());
+        assert!(create_note(&mut conn, Some(no_token), None, "x".into()).is_err());
 
         let bad_type = Anchor {
             anchor_type: "paragraph".into(),
             ..verse("Gen.1.1")
         };
-        assert!(create_note(&mut conn, bad_type, None, "x".into()).is_err());
+        assert!(create_note(&mut conn, Some(bad_type), None, "x".into()).is_err());
     }
 
     #[test]
