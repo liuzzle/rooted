@@ -44,6 +44,7 @@ npm run tauri dev      # launches the desktop app (Rust build + Vite UI)
 npm run build          # typecheck + build the frontend only
 cargo test --manifest-path src-tauri/Cargo.toml              # data-layer tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored # + network tests
+npm test               # frontend logic tests (vitest)
 ```
 
 The database path can be overridden for both the app and the import script via
@@ -53,7 +54,9 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 
 | Path | Purpose |
 |------|---------|
-| `src/` | React UI. `src/features/reader/` (reading pane), `src/features/notes/` (notes & highlights), `src/features/translations/` (pack manager), `src/lib/api.ts` (typed Tauri commands). |
+| `src/App.tsx` | Shell: Read · Notes · Dashboard views, active translation, pack modal. |
+| `src/features/` | `reader/` (reading pane), `notes/` (note panel + chapter rail), `library/` (all notes), `dashboard/`, `translations/` (pack manager). |
+| `src/lib/api.ts` | Typed Tauri commands. `src/lib/reference.ts` — scripture reference parsing. |
 | `src-tauri/src/db.rs` | SQLite access + query commands (with unit tests). |
 | `src-tauri/src/packs.rs` | Pack registry, download, tokenizer, import. |
 | `src-tauri/src/lib.rs` | Tauri command registration + app setup. |
@@ -84,3 +87,17 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 - Removing a pack deletes its verses and tokens but keeps its `translations`
   row, so notes written against it keep resolving and a reinstall lands on the
   same `translation_id`.
+
+## Notes without a reference
+
+A note may have **no anchor at all** — a general study note. `notes` and
+`note_anchors` are separate tables, so this needs no migration, but it means:
+
+- `list_all_notes` uses a LEFT JOIN and returns `anchor: null` for them; a book
+  filter necessarily excludes them.
+- `set_note_anchor` attaches, moves or detaches a reference afterwards. Typed
+  references always produce a **verse** anchor — a word anchor is only ever made
+  by clicking an actual word, never inferred from text.
+- `src/lib/reference.ts` resolves typed references ("1 Cor 13", "ps 23:1") only
+  against installed books, and returns null rather than guessing on an ambiguous
+  or unknown book. `npm test` covers it.
