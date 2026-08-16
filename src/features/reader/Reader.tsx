@@ -3,96 +3,105 @@ import {
   Anchor,
   Book,
   ChapterAnnotations,
-  Translation,
   Verse,
   anchorKey,
-  getActiveTranslation,
   getChapter,
   getChapterAnnotations,
-  listBooks,
-  listTranslations,
-  setActiveTranslation,
+  getLastRead,
+  setLastRead,
   verseAnchor,
   wordAnchor,
 } from "../../lib/api";
+import { formatPosition, parsePosition } from "../../lib/reference";
 import NotesPanel from "../notes/NotesPanel";
-import TranslationsPanel from "../translations/TranslationsPanel";
+import ChapterNotes from "../notes/ChapterNotes";
+import { ReadingTarget } from "../../App";
 
 const EMPTY_ANNOTATIONS: ChapterAnnotations = { highlights: [], note_marks: [] };
 
-export default function Reader() {
-  const [translations, setTranslations] = useState<Translation[]>([]);
-  const [translationId, setTranslationId] = useState<number | null>(null);
-  const [books, setBooks] = useState<Book[]>([]);
+export default function Reader({
+  translationId,
+  books,
+  target,
+  onError,
+}: {
+  translationId: number;
+  books: Book[];
+  target: ReadingTarget | null;
+  onError: (message: string) => void;
+}) {
   const [bookOsis, setBookOsis] = useState<string | null>(null);
   const [chapter, setChapter] = useState(1);
   const [verses, setVerses] = useState<Verse[]>([]);
   const [annotations, setAnnotations] =
     useState<ChapterAnnotations>(EMPTY_ANNOTATIONS);
   const [selection, setSelection] = useState<Anchor | null>(null);
-  const [showPacks, setShowPacks] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [showChapterNotes, setShowChapterNotes] = useState(false);
+  const [notesRevision, setNotesRevision] = useState(0);
 
-  /**
-   * Reload installed translations and settle on one to read: the remembered
-   * choice if it is still installed, otherwise whatever is left.
-   */
-  const refreshTranslations = useCallback(async () => {
-    try {
-      const [ts, remembered] = await Promise.all([
-        listTranslations(),
-        getActiveTranslation(),
-      ]);
-      setTranslations(ts);
-      setTranslationId((current) => {
-        if (current != null && ts.some((t) => t.id === current)) return current;
-        const preferred = ts.find((t) => t.abbrev === remembered);
-        return preferred?.id ?? ts[0]?.id ?? null;
-      });
-      setLoaded(true);
-    } catch (e) {
-      setError(String(e));
-    }
+  // Open where reading left off, falling back to the first book.
+  useEffect(() => {
+    let cancelled = false;
+    getLastRead()
+      .then((position) => {
+        if (cancelled) return;
+        const parsed = parsePosition(position);
+        setBookOsis((current) => current ?? parsed?.bookOsis ?? null);
+        if (parsed) setChapter(parsed.chapter);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
+  // Fall back to the first available book once books load.
   useEffect(() => {
-    refreshTranslations();
-  }, [refreshTranslations]);
-
-  // Load books when the active translation changes.
-  useEffect(() => {
-    if (translationId == null) {
-      setBooks([]);
-      setVerses([]);
-      setAnnotations(EMPTY_ANNOTATIONS);
-      return;
+    if (bookOsis == null && books.length > 0) setBookOsis(books[0].osis);
+    else if (bookOsis != null && books.length > 0 && !books.some((b) => b.osis === bookOsis)) {
+      setBookOsis(books[0].osis);
+      setChapter(1);
     }
-    listBooks(translationId)
-      .then((bs) => {
-        setBooks(bs);
-        if (bs.length > 0 && bookOsis == null) setBookOsis(bs[0].osis);
-      })
-      .catch((e) => setError(String(e)));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [translationId]);
+  }, [books, bookOsis]);
 
-  // Load chapter when translation / book / chapter changes.
+  // Follow jumps sent from the library or dashboard.
   useEffect(() => {
-    if (translationId == null || bookOsis == null) return;
+    if (!target) return;
+    setBookOsis(target.bookOsis);
+    setChapter(target.chapter);
+    setSelection(target.selection);
+  }, [target]);
+
+  useEffect(() => {
+    if (bookOsis == null) return;
     getChapter(translationId, bookOsis, chapter)
       .then(setVerses)
-      .catch((e) => setError(String(e)));
-  }, [translationId, bookOsis, chapter]);
+      .catch((e) => onError(String(e)));
+    setLastRead(formatPosition(bookOsis, chapter)).catch(() => {});
+  }, [translationId, bookOsis, chapter, onError]);
+
+  // Bring the verse a jump landed on into view once the chapter has rendered.
+  useEffect(() => {
+    const verseId = target?.selection?.verse_id;
+    if (!verseId || verses.length === 0) return;
+    document
+      .getElementById(`verse-${verseId}`)
+      ?.scrollIntoView({ block: "center" });
+  }, [target, verses]);
 
   const reloadAnnotations = useCallback(() => {
-    if (translationId == null || bookOsis == null) return;
+    if (bookOsis == null) return;
     getChapterAnnotations(translationId, bookOsis, chapter)
       .then(setAnnotations)
-      .catch((e) => setError(String(e)));
-  }, [translationId, bookOsis, chapter]);
+      .catch((e) => onError(String(e)));
+  }, [translationId, bookOsis, chapter, onError]);
 
-  useEffect(reloadAnnotations, [reloadAnnotations]);
+  useEffect(reloadAnnotations, [reloadAnnotations, notesRevision]);
+
+  /** A note or highlight changed: refresh the pane and any open note list. */
+  function annotationsChanged() {
+    setNotesRevision((n) => n + 1);
+  }
 
   // Fast lookups keyed the same way anchors are, so a verse annotation matches
   // by verse id alone and a word annotation by (verse id, token index).
@@ -122,15 +131,32 @@ export default function Reader() {
     return m;
   }, [annotations]);
 
-  const activeBook = useMemo(
-    () => books.find((b) => b.osis === bookOsis) ?? null,
-    [books, bookOsis],
-  );
+  const bookIndex = books.findIndex((b) => b.osis === bookOsis);
+  const activeBook = bookIndex >= 0 ? books[bookIndex] : null;
 
-  const activeTranslation = useMemo(
-    () => translations.find((t) => t.id === translationId) ?? null,
-    [translations, translationId],
-  );
+  /** Previous/next chapter, crossing book boundaries. */
+  const prev = useMemo(() => {
+    if (!activeBook) return null;
+    if (chapter > 1) return { book: activeBook, chapter: chapter - 1 };
+    const before = books[bookIndex - 1];
+    return before ? { book: before, chapter: before.chapter_count } : null;
+  }, [activeBook, books, bookIndex, chapter]);
+
+  const next = useMemo(() => {
+    if (!activeBook) return null;
+    if (chapter < activeBook.chapter_count)
+      return { book: activeBook, chapter: chapter + 1 };
+    const after = books[bookIndex + 1];
+    return after ? { book: after, chapter: 1 } : null;
+  }, [activeBook, books, bookIndex, chapter]);
+
+  function goTo(step: { book: Book; chapter: number } | null) {
+    if (!step) return;
+    setBookOsis(step.book.osis);
+    setChapter(step.chapter);
+    setSelection(null);
+    document.querySelector(".verses")?.scrollTo({ top: 0 });
+  }
 
   const ot = books.filter((b) => b.testament === "OT");
   const nt = books.filter((b) => b.testament === "NT");
@@ -139,22 +165,6 @@ export default function Reader() {
     setBookOsis(osis);
     setChapter(1);
     setSelection(null);
-  }
-
-  /**
-   * Switch translations and remember the choice.
-   *
-   * A word selection falls back to its verse rather than disappearing: the same
-   * token index in another text is a different word, but the notes written on
-   * that word are still about this verse — and that's where they now live.
-   */
-  function switchTranslation(id: number) {
-    setTranslationId(id);
-    setSelection((cur) =>
-      cur?.anchor_type === "word" ? verseAnchor(cur.verse_id) : cur,
-    );
-    const abbrev = translations.find((t) => t.id === id)?.abbrev;
-    if (abbrev) setActiveTranslation(abbrev).catch((e) => setError(String(e)));
   }
 
   /** Clicking the same anchor twice closes the panel. */
@@ -170,32 +180,6 @@ export default function Reader() {
       ? `“${selection.surface}” · ${selection.verse_id}`
       : selection.verse_id;
   }, [selection]);
-
-  if (error) {
-    return <div className="empty">Error: {error}</div>;
-  }
-
-  if (loaded && translations.length === 0) {
-    return (
-      <>
-        <div className="empty">
-          <h2>No Bible installed yet</h2>
-          <p>Download a translation to start reading.</p>
-          <button className="primary" onClick={() => setShowPacks(true)}>
-            Browse translations
-          </button>
-        </div>
-        {showPacks && (
-          <TranslationsPanel
-            activeAbbrev={null}
-            onUse={() => setShowPacks(false)}
-            onInstalled={refreshTranslations}
-            onClose={() => setShowPacks(false)}
-          />
-        )}
-      </>
-    );
-  }
 
   return (
     <div className="reader">
@@ -236,17 +220,14 @@ export default function Reader() {
             </h2>
           </div>
           <div className="controls">
-            <select
-              value={translationId ?? ""}
-              onChange={(e) => switchTranslation(Number(e.target.value))}
-              title={activeTranslation?.name}
+            <button
+              className="ghost-btn"
+              onClick={() => goTo(prev)}
+              disabled={!prev}
+              title={prev ? `${prev.book.name} ${prev.chapter}` : "Start of the Bible"}
             >
-              {translations.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.abbrev}
-                </option>
-              ))}
-            </select>
+              ‹
+            </button>
             <select
               value={chapter}
               onChange={(e) => setChapter(Number(e.target.value))}
@@ -259,8 +240,19 @@ export default function Reader() {
                 ),
               )}
             </select>
-            <button className="ghost-btn" onClick={() => setShowPacks(true)}>
-              Translations…
+            <button
+              className="ghost-btn"
+              onClick={() => goTo(next)}
+              disabled={!next}
+              title={next ? `${next.book.name} ${next.chapter}` : "End of the Bible"}
+            >
+              ›
+            </button>
+            <button
+              className={showChapterNotes ? "ghost-btn active" : "ghost-btn"}
+              onClick={() => setShowChapterNotes((v) => !v)}
+            >
+              Chapter notes
             </button>
           </div>
         </header>
@@ -276,6 +268,7 @@ export default function Reader() {
             return (
               <p
                 key={v.verse_id}
+                id={`verse-${v.verse_id}`}
                 className={[
                   "verse",
                   isSelected ? "selected" : "",
@@ -302,7 +295,7 @@ export default function Reader() {
                 )}
                 <VerseText
                   verse={v}
-                  translationId={translationId!}
+                  translationId={translationId}
                   selection={selection}
                   highlightByAnchor={highlightByAnchor}
                   notesByAnchor={notesByAnchor}
@@ -311,10 +304,29 @@ export default function Reader() {
               </p>
             );
           })}
+
+          {verses.length > 0 && (
+            <nav className="chapter-nav">
+              <button
+                className="ghost-btn"
+                onClick={() => goTo(prev)}
+                disabled={!prev}
+              >
+                ‹ {prev ? `${prev.book.name} ${prev.chapter}` : "Start"}
+              </button>
+              <button
+                className="ghost-btn"
+                onClick={() => goTo(next)}
+                disabled={!next}
+              >
+                {next ? `${next.book.name} ${next.chapter}` : "End"} ›
+              </button>
+            </nav>
+          )}
         </div>
       </main>
 
-      {selection && translationId != null && (
+      {selection ? (
         <NotesPanel
           anchor={selection}
           translationId={translationId}
@@ -322,22 +334,22 @@ export default function Reader() {
           highlight={highlightByAnchor.get(anchorKey(selection)) ?? null}
           verseNoteCount={verseNoteCount(notesByAnchor, selection.verse_id)}
           onShowVerse={() => setSelection(verseAnchor(selection.verse_id))}
-          onChanged={reloadAnnotations}
+          onChanged={annotationsChanged}
           onClose={() => setSelection(null)}
         />
-      )}
-
-      {showPacks && (
-        <TranslationsPanel
-          activeAbbrev={activeTranslation?.abbrev ?? null}
-          onUse={(abbrev) => {
-            const t = translations.find((x) => x.abbrev === abbrev);
-            if (t) switchTranslation(t.id);
-            setShowPacks(false);
-          }}
-          onInstalled={refreshTranslations}
-          onClose={() => setShowPacks(false)}
-        />
+      ) : (
+        showChapterNotes &&
+        bookOsis != null && (
+          <ChapterNotes
+            translationId={translationId}
+            bookOsis={bookOsis}
+            bookName={activeBook?.name ?? bookOsis}
+            chapter={chapter}
+            revision={notesRevision}
+            onSelect={setSelection}
+            onClose={() => setShowChapterNotes(false)}
+          />
+        )
       )}
     </div>
   );
