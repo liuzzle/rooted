@@ -136,12 +136,21 @@ export function listNotes(
   return invoke("list_notes", { anchor, translationId });
 }
 
+/** `anchor: null` creates a standalone note with no scripture reference. */
 export function createNote(
-  anchor: Anchor,
+  anchor: Anchor | null,
   title: string | null,
   body: string,
 ): Promise<number> {
   return invoke("create_note", { anchor, title, body });
+}
+
+/** Attach a reference to a note, move it, or drop it (`anchor: null`). */
+export function setNoteAnchor(
+  noteId: number,
+  anchor: Anchor | null,
+): Promise<void> {
+  return invoke("set_note_anchor", { noteId, anchor });
 }
 
 export function updateNote(
@@ -170,6 +179,100 @@ export function getChapterAnnotations(
   chapter: number,
 ): Promise<ChapterAnnotations> {
   return invoke("get_chapter_annotations", { translationId, bookOsis, chapter });
+}
+
+// --- study surfaces --------------------------------------------------------
+
+export interface AnchorInfo {
+  anchor_type: "verse" | "word";
+  verse_id: string;
+  book_osis: string;
+  book_name: string | null;
+  chapter: number;
+  verse: number;
+  translation_id: number | null;
+  token_idx: number | null;
+  surface: string | null;
+  origin_abbrev: string | null;
+  degraded: boolean;
+}
+
+/** A note as the library and chapter list show it. */
+export interface LibraryNote {
+  note_id: number;
+  title: string | null;
+  body: string;
+  created_at: string;
+  updated_at: string;
+  /** `null` for a standalone note with no scripture reference. */
+  anchor: AnchorInfo | null;
+}
+
+export interface RecentHighlight {
+  id: number;
+  anchor_type: "verse" | "word";
+  verse_id: string;
+  book_name: string | null;
+  chapter: number;
+  verse: number;
+  color: string;
+  surface: string | null;
+  text: string | null;
+  created_at: string;
+}
+
+export interface Count {
+  key: string;
+  label: string | null;
+  count: number;
+}
+
+export interface Stats {
+  notes_total: number;
+  notes_standalone: number;
+  highlights_total: number;
+  translations_installed: number;
+  books_annotated: number;
+  by_book: Count[];
+  by_color: Count[];
+  notes_by_day: Count[];
+}
+
+export function listAllNotes(
+  translationId: number,
+  bookOsis: string | null,
+  query: string | null,
+  limit = 200,
+): Promise<LibraryNote[]> {
+  return invoke("list_all_notes", { translationId, bookOsis, query, limit });
+}
+
+export function listChapterNotes(
+  translationId: number,
+  bookOsis: string,
+  chapter: number,
+): Promise<LibraryNote[]> {
+  return invoke("list_chapter_notes", { translationId, bookOsis, chapter });
+}
+
+export function listRecentHighlights(
+  translationId: number,
+  limit = 5,
+): Promise<RecentHighlight[]> {
+  return invoke("list_recent_highlights", { translationId, limit });
+}
+
+export function getStats(): Promise<Stats> {
+  return invoke("get_stats");
+}
+
+/** Last chapter read, as `"Gen.1"`. */
+export function getLastRead(): Promise<string | null> {
+  return invoke("get_last_read");
+}
+
+export function setLastRead(position: string): Promise<void> {
+  return invoke("set_last_read", { position });
 }
 
 // --- translation packs -----------------------------------------------------
