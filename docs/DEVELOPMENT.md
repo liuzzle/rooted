@@ -28,6 +28,7 @@ python3 scripts/import_bible.py                 # WEB (default)
 ```bash
 npm run tauri dev      # launches the desktop app (Rust build + Vite UI)
 npm run build          # typecheck + build the frontend only
+cargo test --manifest-path src-tauri/Cargo.toml   # data-layer tests
 ```
 
 The database path can be overridden for both the app and the import script via
@@ -37,8 +38,8 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 
 | Path | Purpose |
 |------|---------|
-| `src/` | React UI. `src/features/reader/` (reading pane), `src/lib/api.ts` (typed Tauri commands). |
-| `src-tauri/src/db.rs` | SQLite access + query commands. |
+| `src/` | React UI. `src/features/reader/` (reading pane), `src/features/notes/` (notes & highlight panel), `src/lib/api.ts` (typed Tauri commands). |
+| `src-tauri/src/db.rs` | SQLite access + query commands (with unit tests). |
 | `src-tauri/src/lib.rs` | Tauri command registration + app setup. |
 | `src-tauri/migrations/0001_init.sql` | Canonical schema (books, translations, verses, tokens, notes, highlights). |
 | `scripts/import_bible.py` | Parse a getbible.net translation → canonical BCV + token rows. |
@@ -49,3 +50,8 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 - Word anchoring uses `(translation_id, verse_id, token_idx)` with a stored
   `surface` snapshot and char offsets, so word-level notes/highlights survive
   re-imports and degrade gracefully across translations (Phase 2).
+- **Verse** notes and highlights store no `translation_id` at all, so they show
+  in every translation. **Word** notes and highlights are scoped to the
+  translation they were made in.
+- One highlight per anchor: setting a colour replaces the previous one, and
+  clicking the active colour (or the slashed swatch) removes it.
