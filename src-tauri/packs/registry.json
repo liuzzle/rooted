@@ -1,0 +1,67 @@
+{
+  "registry_version": 1,
+  "source": "getbible.net v2 (https://api.getbible.net/v2/<slug>/<book>.json)",
+  "note": "Freely distributable translations only. Copyrighted texts (ESV/NIV/…) are not bundled or downloadable here — they arrive later via licensed APIs or user-supplied modules.",
+  "packs": [
+    {
+      "abbrev": "WEB",
+      "name": "World English Bible",
+      "slug": "web",
+      "language": "en",
+      "license": "Public Domain",
+      "year": "2000",
+      "versification": "kjv",
+      "blurb": "Modern English revision of the ASV. The default pack."
+    },
+    {
+      "abbrev": "KJV",
+      "name": "King James Version",
+      "slug": "kjv",
+      "language": "en",
+      "license": "GPL",
+      "year": "1611",
+      "versification": "kjv",
+      "blurb": "The Authorised Version of 1611."
+    },
+    {
+      "abbrev": "ASV",
+      "name": "American Standard Version",
+      "slug": "asv",
+      "language": "en",
+      "license": "Public Domain",
+      "year": "1901",
+      "versification": "kjv",
+      "blurb": "Formal-equivalence revision of the KJV."
+    },
+    {
+      "abbrev": "YLT",
+      "name": "Young's Literal Translation",
+      "slug": "ylt",
+      "language": "en",
+      "license": "Public Domain",
+      "year": "1862",
+      "versification": "kjv",
+      "blurb": "Extremely literal rendering, useful for word study."
+    },
+    {
+      "abbrev": "BBE",
+      "name": "Bible in Basic English",
+      "slug": "basicenglish",
+      "language": "en",
+      "license": "Public Domain",
+      "year": "1949",
+      "versification": "kjv",
+      "blurb": "Limited 1000-word vocabulary; plain phrasing."
+    },
+    {
+      "abbrev": "DRA",
+      "name": "Douay-Rheims",
+      "slug": "douayrheims",
+      "language": "en",
+      "license": "Public Domain",
+      "year": "1899",
+      "versification": "kjv",
+      "blurb": "English translation of the Latin Vulgate."
+    }
+  ]
+}
