@@ -1,4 +1,4 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -28,12 +28,46 @@ pub fn open() -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Every migration, in order. Each is written to be idempotent (`IF NOT
+/// EXISTS`), so applying the whole list on every start is safe.
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/0001_init.sql"),
+    include_str!("../migrations/0002_settings.sql"),
+];
+
 /// Enable foreign keys and apply the canonical schema (idempotent).
 pub fn apply_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch("PRAGMA foreign_keys = ON;")
         .map_err(|e| e.to_string())?;
-    conn.execute_batch(include_str!("../migrations/0001_init.sql"))
-        .map_err(|e| e.to_string())
+    for migration in MIGRATIONS {
+        conn.execute_batch(migration).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    conn.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
+}
+
+pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                        updated_at = datetime('now')",
+        rusqlite::params![key, value],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -77,9 +111,16 @@ pub struct Verse {
 // Queries
 // ---------------------------------------------------------------------------
 
+/// Translations that actually have text installed. A pack that was removed
+/// keeps its `translations` row (so word anchors written against it still
+/// resolve) but has no verses, and must not appear in the reader.
 pub fn list_translations(conn: &Connection) -> Result<Vec<Translation>, String> {
     let mut stmt = conn
-        .prepare("SELECT id, abbrev, name, language FROM translations ORDER BY abbrev")
+        .prepare(
+            "SELECT id, abbrev, name, language FROM translations t
+              WHERE EXISTS (SELECT 1 FROM verses v WHERE v.translation_id = t.id)
+              ORDER BY abbrev",
+        )
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| {
@@ -237,6 +278,13 @@ pub struct Note {
     pub translation_id: Option<i64>,
     pub token_idx: Option<i64>,
     pub surface: Option<String>,
+    /// Abbrev of the translation a word note was written in (`None` for verse
+    /// notes, or if that pack's row has since vanished).
+    pub origin_abbrev: Option<String>,
+    /// True when this is a word note surfaced at verse level because the reader
+    /// is in a different translation than the one it was anchored in (Tier-1
+    /// graceful degradation — we never re-point a word anchor at another text).
+    pub degraded: bool,
 }
 
 #[derive(Serialize)]
@@ -253,8 +301,12 @@ pub struct Highlight {
 #[derive(Serialize)]
 pub struct NoteMark {
     pub verse_id: String,
-    pub token_idx: Option<i64>, // None = verse-level note
+    pub token_idx: Option<i64>, // None = verse-level indicator
+    /// Notes anchored exactly here (verse notes, or word notes in the active
+    /// translation).
     pub count: i64,
+    /// Word notes from *other* translations, shown on the verse instead.
+    pub degraded: i64,
 }
 
 #[derive(Serialize)]
@@ -329,52 +381,82 @@ pub fn delete_note(conn: &Connection, note_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Notes attached to one anchor, newest last.
-pub fn list_notes(conn: &Connection, anchor: Anchor) -> Result<Vec<Note>, String> {
+const NOTE_COLUMNS: &str = "SELECT n.note_id, n.title, n.body, n.created_at, n.updated_at,
+            a.anchor_type, a.verse_id, a.translation_id, a.token_idx, a.surface, t.abbrev
+       FROM notes n
+       JOIN note_anchors a ON a.note_id = n.note_id
+       LEFT JOIN translations t ON t.id = a.translation_id";
+
+fn map_note(r: &rusqlite::Row, active_translation_id: i64) -> rusqlite::Result<Note> {
+    let anchor_type: String = r.get(5)?;
+    let translation_id: Option<i64> = r.get(7)?;
+    let degraded = anchor_type == "word" && translation_id != Some(active_translation_id);
+    Ok(Note {
+        note_id: r.get(0)?,
+        title: r.get(1)?,
+        body: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+        anchor_type,
+        verse_id: r.get(6)?,
+        translation_id,
+        token_idx: r.get(8)?,
+        surface: r.get(9)?,
+        origin_abbrev: r.get(10)?,
+        degraded,
+    })
+}
+
+/// Notes attached to one anchor, oldest first.
+///
+/// A **word** anchor returns only notes written on that exact word in that
+/// exact translation. A **verse** anchor returns the verse's own
+/// translation-independent notes *plus* any word notes made in a translation
+/// other than `active_translation_id` — those can't be re-anchored to a text
+/// they were never written against, so they surface here, flagged `degraded`,
+/// carrying the word they were written on.
+pub fn list_notes(
+    conn: &Connection,
+    anchor: Anchor,
+    active_translation_id: i64,
+) -> Result<Vec<Note>, String> {
     let anchor = anchor.normalized()?;
-    let sql = if anchor.is_word() {
-        "SELECT n.note_id, n.title, n.body, n.created_at, n.updated_at,
-                a.anchor_type, a.verse_id, a.translation_id, a.token_idx, a.surface
-           FROM notes n JOIN note_anchors a ON a.note_id = n.note_id
-          WHERE a.anchor_type = 'word' AND a.verse_id = ?1
-            AND a.translation_id = ?2 AND a.token_idx = ?3
-          ORDER BY n.created_at, n.note_id"
-    } else {
-        "SELECT n.note_id, n.title, n.body, n.created_at, n.updated_at,
-                a.anchor_type, a.verse_id, a.translation_id, a.token_idx, a.surface
-           FROM notes n JOIN note_anchors a ON a.note_id = n.note_id
-          WHERE a.anchor_type = 'verse' AND a.verse_id = ?1
-          ORDER BY n.created_at, n.note_id"
-    };
 
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let map_row = |r: &rusqlite::Row| {
-        Ok(Note {
-            note_id: r.get(0)?,
-            title: r.get(1)?,
-            body: r.get(2)?,
-            created_at: r.get(3)?,
-            updated_at: r.get(4)?,
-            anchor_type: r.get(5)?,
-            verse_id: r.get(6)?,
-            translation_id: r.get(7)?,
-            token_idx: r.get(8)?,
-            surface: r.get(9)?,
-        })
-    };
+    if anchor.is_word() {
+        let mut stmt = conn
+            .prepare(&format!(
+                "{NOTE_COLUMNS}
+                  WHERE a.anchor_type = 'word' AND a.verse_id = ?1
+                    AND a.translation_id = ?2 AND a.token_idx = ?3
+                  ORDER BY n.created_at, n.note_id"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![anchor.verse_id, anchor.translation_id, anchor.token_idx],
+                |r| map_note(r, active_translation_id),
+            )
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>();
+        return rows.map_err(|e| e.to_string());
+    }
 
-    let rows = if anchor.is_word() {
-        stmt.query_map(
-            rusqlite::params![anchor.verse_id, anchor.translation_id, anchor.token_idx],
-            map_row,
+    let mut stmt = conn
+        .prepare(&format!(
+            "{NOTE_COLUMNS}
+              WHERE a.verse_id = ?1
+                AND (a.anchor_type = 'verse'
+                     OR (a.anchor_type = 'word' AND a.translation_id <> ?2))
+              ORDER BY n.created_at, n.note_id"
+        ))
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![anchor.verse_id, active_translation_id],
+            |r| map_note(r, active_translation_id),
         )
         .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-    } else {
-        stmt.query_map(rusqlite::params![anchor.verse_id], map_row)
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-    };
+        .collect::<Result<Vec<_>, _>>();
     rows.map_err(|e| e.to_string())
 }
 
@@ -460,13 +542,20 @@ pub fn chapter_annotations(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
+    // Word notes in the active translation mark their own word; verse notes and
+    // word notes from other translations both mark the verse.
     let mut nstmt = conn
         .prepare(&format!(
-            "SELECT verse_id, token_idx, COUNT(*)
+            "SELECT verse_id,
+                    CASE WHEN anchor_type = 'word' AND translation_id = ?1
+                         THEN token_idx END AS mark_token,
+                    SUM(CASE WHEN anchor_type = 'word' AND translation_id <> ?1
+                             THEN 0 ELSE 1 END),
+                    SUM(CASE WHEN anchor_type = 'word' AND translation_id <> ?1
+                             THEN 1 ELSE 0 END)
                FROM note_anchors
               WHERE verse_id IN ({verse_scope})
-                AND (anchor_type = 'verse' OR translation_id = ?1)
-              GROUP BY verse_id, token_idx"
+              GROUP BY verse_id, mark_token"
         ))
         .map_err(|e| e.to_string())?;
     let note_marks = nstmt
@@ -475,6 +564,7 @@ pub fn chapter_annotations(
                 verse_id: r.get(0)?,
                 token_idx: r.get(1)?,
                 count: r.get(2)?,
+                degraded: r.get(3)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -543,18 +633,18 @@ mod tests {
         let id = create_note(&mut conn, verse("Gen.1.1"), Some("Origins".into()), "body".into())
             .unwrap();
 
-        let notes = list_notes(&conn, verse("Gen.1.1")).unwrap();
+        let notes = list_notes(&conn, verse("Gen.1.1"), 1).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].title.as_deref(), Some("Origins"));
         assert_eq!(notes[0].body, "body");
 
         update_note(&conn, id, None, "edited".into()).unwrap();
-        let notes = list_notes(&conn, verse("Gen.1.1")).unwrap();
+        let notes = list_notes(&conn, verse("Gen.1.1"), 1).unwrap();
         assert_eq!(notes[0].title, None);
         assert_eq!(notes[0].body, "edited");
 
         delete_note(&conn, id).unwrap();
-        assert!(list_notes(&conn, verse("Gen.1.1")).unwrap().is_empty());
+        assert!(list_notes(&conn, verse("Gen.1.1"), 1).unwrap().is_empty());
         // The anchor went with it (ON DELETE CASCADE).
         let anchors: i64 = conn
             .query_row("SELECT COUNT(*) FROM note_anchors", [], |r| r.get(0))
@@ -594,22 +684,87 @@ mod tests {
         )
         .unwrap();
 
-        let notes = list_notes(&conn, word("Gen.1.1", 1, 2, "beginning")).unwrap();
+        let notes = list_notes(&conn, word("Gen.1.1", 1, 2, "beginning"), 1).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].surface.as_deref(), Some("beginning"));
         // A different token, and a different translation, are different anchors.
-        assert!(list_notes(&conn, word("Gen.1.1", 1, 1, "the"))
+        assert!(list_notes(&conn, word("Gen.1.1", 1, 1, "the"), 1)
             .unwrap()
             .is_empty());
-        assert!(list_notes(&conn, word("Gen.1.1", 2, 2, "beginning"))
+        assert!(list_notes(&conn, word("Gen.1.1", 2, 2, "beginning"), 2)
             .unwrap()
             .is_empty());
 
-        assert_eq!(chapter_annotations(&conn, 1, "Gen", 1).unwrap().note_marks.len(), 1);
-        assert!(chapter_annotations(&conn, 2, "Gen", 1)
-            .unwrap()
-            .note_marks
-            .is_empty());
+        // In WEB it marks the word itself.
+        let marks = chapter_annotations(&conn, 1, "Gen", 1).unwrap().note_marks;
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].token_idx, Some(2));
+        assert_eq!((marks[0].count, marks[0].degraded), (1, 0));
+    }
+
+    #[test]
+    fn word_notes_degrade_to_verse_level_in_another_translation() {
+        let mut conn = fixture();
+        create_note(
+            &mut conn,
+            word("Gen.1.1", 1, 2, "beginning"),
+            None,
+            "on the word".into(),
+        )
+        .unwrap();
+        create_note(&mut conn, verse("Gen.1.1"), None, "on the verse".into()).unwrap();
+
+        // Reading KJV: the WEB word note must not point at any KJV word.
+        let marks = chapter_annotations(&conn, 2, "Gen", 1).unwrap().note_marks;
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].token_idx, None, "must not re-anchor to a KJV word");
+        assert_eq!((marks[0].count, marks[0].degraded), (1, 1));
+
+        // It surfaces on the verse, flagged, and still knows its word + origin.
+        let notes = list_notes(&conn, verse("Gen.1.1"), 2).unwrap();
+        assert_eq!(notes.len(), 2);
+        let word_note = notes.iter().find(|n| n.anchor_type == "word").unwrap();
+        assert!(word_note.degraded);
+        assert_eq!(word_note.surface.as_deref(), Some("beginning"));
+        assert_eq!(word_note.origin_abbrev.as_deref(), Some("WEB"));
+        let verse_note = notes.iter().find(|n| n.anchor_type == "verse").unwrap();
+        assert!(!verse_note.degraded, "verse notes are translation-independent");
+
+        // Back in WEB it belongs to the word again, not the verse.
+        let notes = list_notes(&conn, verse("Gen.1.1"), 1).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].anchor_type, "verse");
+        let notes = list_notes(&conn, word("Gen.1.1", 1, 2, "beginning"), 1).unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].degraded);
+    }
+
+    #[test]
+    fn removed_packs_disappear_from_the_reader_but_keep_their_row() {
+        let conn = fixture();
+        assert_eq!(list_translations(&conn).unwrap().len(), 2);
+
+        conn.execute("DELETE FROM verses WHERE translation_id = 2", [])
+            .unwrap();
+        let ts = list_translations(&conn).unwrap();
+        assert_eq!(ts.len(), 1);
+        assert_eq!(ts[0].abbrev, "WEB");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM translations", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "the translation row itself must survive");
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let conn = fixture();
+        assert_eq!(get_setting(&conn, "active_translation").unwrap(), None);
+        set_setting(&conn, "active_translation", "WEB").unwrap();
+        set_setting(&conn, "active_translation", "KJV").unwrap();
+        assert_eq!(
+            get_setting(&conn, "active_translation").unwrap().as_deref(),
+            Some("KJV")
+        );
     }
 
     #[test]
