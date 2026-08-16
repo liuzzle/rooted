@@ -6,14 +6,17 @@ import {
   Translation,
   Verse,
   anchorKey,
+  getActiveTranslation,
   getChapter,
   getChapterAnnotations,
   listBooks,
   listTranslations,
+  setActiveTranslation,
   verseAnchor,
   wordAnchor,
 } from "../../lib/api";
 import NotesPanel from "../notes/NotesPanel";
+import TranslationsPanel from "../translations/TranslationsPanel";
 
 const EMPTY_ANNOTATIONS: ChapterAnnotations = { highlights: [], note_marks: [] };
 
@@ -27,21 +30,44 @@ export default function Reader() {
   const [annotations, setAnnotations] =
     useState<ChapterAnnotations>(EMPTY_ANNOTATIONS);
   const [selection, setSelection] = useState<Anchor | null>(null);
+  const [showPacks, setShowPacks] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Load translations once.
-  useEffect(() => {
-    listTranslations()
-      .then((ts) => {
-        setTranslations(ts);
-        if (ts.length > 0) setTranslationId(ts[0].id);
-      })
-      .catch((e) => setError(String(e)));
+  /**
+   * Reload installed translations and settle on one to read: the remembered
+   * choice if it is still installed, otherwise whatever is left.
+   */
+  const refreshTranslations = useCallback(async () => {
+    try {
+      const [ts, remembered] = await Promise.all([
+        listTranslations(),
+        getActiveTranslation(),
+      ]);
+      setTranslations(ts);
+      setTranslationId((current) => {
+        if (current != null && ts.some((t) => t.id === current)) return current;
+        const preferred = ts.find((t) => t.abbrev === remembered);
+        return preferred?.id ?? ts[0]?.id ?? null;
+      });
+      setLoaded(true);
+    } catch (e) {
+      setError(String(e));
+    }
   }, []);
+
+  useEffect(() => {
+    refreshTranslations();
+  }, [refreshTranslations]);
 
   // Load books when the active translation changes.
   useEffect(() => {
-    if (translationId == null) return;
+    if (translationId == null) {
+      setBooks([]);
+      setVerses([]);
+      setAnnotations(EMPTY_ANNOTATIONS);
+      return;
+    }
     listBooks(translationId)
       .then((bs) => {
         setBooks(bs);
@@ -84,13 +110,13 @@ export default function Reader() {
   }, [annotations]);
 
   const notesByAnchor = useMemo(() => {
-    const m = new Map<string, number>();
+    const m = new Map<string, { count: number; degraded: number }>();
     for (const n of annotations.note_marks) {
       m.set(
         n.token_idx === null
           ? `v:${n.verse_id}`
           : `w:${n.verse_id}:${n.token_idx}`,
-        n.count,
+        { count: n.count, degraded: n.degraded },
       );
     }
     return m;
@@ -101,6 +127,11 @@ export default function Reader() {
     [books, bookOsis],
   );
 
+  const activeTranslation = useMemo(
+    () => translations.find((t) => t.id === translationId) ?? null,
+    [translations, translationId],
+  );
+
   const ot = books.filter((b) => b.testament === "OT");
   const nt = books.filter((b) => b.testament === "NT");
 
@@ -108,6 +139,18 @@ export default function Reader() {
     setBookOsis(osis);
     setChapter(1);
     setSelection(null);
+  }
+
+  /**
+   * Switch translations and remember the choice. A word selection is dropped:
+   * word anchors belong to the translation they were made in, so the same
+   * token index in another text is a different word.
+   */
+  function switchTranslation(id: number) {
+    setTranslationId(id);
+    setSelection((cur) => (cur?.anchor_type === "word" ? null : cur));
+    const abbrev = translations.find((t) => t.id === id)?.abbrev;
+    if (abbrev) setActiveTranslation(abbrev).catch((e) => setError(String(e)));
   }
 
   /** Clicking the same anchor twice closes the panel. */
@@ -128,13 +171,25 @@ export default function Reader() {
     return <div className="empty">Error: {error}</div>;
   }
 
-  if (translations.length === 0) {
+  if (loaded && translations.length === 0) {
     return (
-      <div className="empty">
-        <h2>No Bible installed yet</h2>
-        <p>Import a translation, then reopen the app:</p>
-        <pre>python3 scripts/import_bible.py</pre>
-      </div>
+      <>
+        <div className="empty">
+          <h2>No Bible installed yet</h2>
+          <p>Download a translation to start reading.</p>
+          <button className="primary" onClick={() => setShowPacks(true)}>
+            Browse translations
+          </button>
+        </div>
+        {showPacks && (
+          <TranslationsPanel
+            activeAbbrev={null}
+            onUse={() => setShowPacks(false)}
+            onInstalled={refreshTranslations}
+            onClose={() => setShowPacks(false)}
+          />
+        )}
+      </>
     );
   }
 
@@ -179,7 +234,8 @@ export default function Reader() {
           <div className="controls">
             <select
               value={translationId ?? ""}
-              onChange={(e) => setTranslationId(Number(e.target.value))}
+              onChange={(e) => switchTranslation(Number(e.target.value))}
+              title={activeTranslation?.name}
             >
               {translations.map((t) => (
                 <option key={t.id} value={t.id}>
@@ -199,6 +255,9 @@ export default function Reader() {
                 ),
               )}
             </select>
+            <button className="ghost-btn" onClick={() => setShowPacks(true)}>
+              Translations…
+            </button>
           </div>
         </header>
 
@@ -206,7 +265,7 @@ export default function Reader() {
           {verses.map((v) => {
             const vKey = `v:${v.verse_id}`;
             const verseHl = highlightByAnchor.get(vKey);
-            const verseNotes = notesByAnchor.get(vKey) ?? 0;
+            const verseNotes = notesByAnchor.get(vKey);
             const isSelected =
               selection?.anchor_type === "verse" &&
               selection.verse_id === v.verse_id;
@@ -228,10 +287,12 @@ export default function Reader() {
                 >
                   {v.verse}
                 </sup>
-                {verseNotes > 0 && (
+                {verseNotes && (
                   <span
-                    className="note-dot"
-                    title={`${verseNotes} verse note${verseNotes > 1 ? "s" : ""}`}
+                    className={
+                      verseNotes.degraded > 0 ? "note-dot degraded" : "note-dot"
+                    }
+                    title={noteDotTitle(verseNotes)}
                     onClick={() => toggleSelection(verseAnchor(v.verse_id))}
                   />
                 )}
@@ -249,17 +310,47 @@ export default function Reader() {
         </div>
       </main>
 
-      {selection && (
+      {selection && translationId != null && (
         <NotesPanel
           anchor={selection}
+          translationId={translationId}
           label={selectionLabel}
           highlight={highlightByAnchor.get(anchorKey(selection)) ?? null}
           onChanged={reloadAnnotations}
           onClose={() => setSelection(null)}
         />
       )}
+
+      {showPacks && (
+        <TranslationsPanel
+          activeAbbrev={activeTranslation?.abbrev ?? null}
+          onUse={(abbrev) => {
+            const t = translations.find((x) => x.abbrev === abbrev);
+            if (t) switchTranslation(t.id);
+            setShowPacks(false);
+          }}
+          onInstalled={refreshTranslations}
+          onClose={() => setShowPacks(false)}
+        />
+      )}
     </div>
   );
+}
+
+function noteDotTitle({
+  count,
+  degraded,
+}: {
+  count: number;
+  degraded: number;
+}): string {
+  const parts: string[] = [];
+  if (count > 0) parts.push(`${count} verse note${count > 1 ? "s" : ""}`);
+  if (degraded > 0)
+    parts.push(
+      `${degraded} word note${degraded > 1 ? "s" : ""} from another translation`,
+    );
+  return parts.join(" · ");
 }
 
 /**
@@ -279,7 +370,7 @@ function VerseText({
   translationId: number;
   selection: Anchor | null;
   highlightByAnchor: Map<string, string>;
-  notesByAnchor: Map<string, number>;
+  notesByAnchor: Map<string, { count: number; degraded: number }>;
   onWord: (anchor: Anchor) => void;
 }) {
   const { text, tokens } = verse;
@@ -296,7 +387,7 @@ function VerseText({
       selection.verse_id === verse.verse_id &&
       selection.token_idx === tok.idx;
     const hl = highlightByAnchor.get(key);
-    const hasNote = (notesByAnchor.get(key) ?? 0) > 0;
+    const hasNote = (notesByAnchor.get(key)?.count ?? 0) > 0;
     parts.push(
       <span
         key={`tok-${tok.idx}`}

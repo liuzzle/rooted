@@ -22,12 +22,15 @@ export const HIGHLIGHT_COLORS = [
 
 export default function NotesPanel({
   anchor,
+  translationId,
   label,
   highlight,
   onChanged,
   onClose,
 }: {
   anchor: Anchor;
+  /** Translation being read — decides which word notes are degraded. */
+  translationId: number;
   label: string;
   highlight: string | null;
   onChanged: () => void;
@@ -41,19 +44,20 @@ export default function NotesPanel({
 
   const key = anchorKey(anchor);
 
-  // Reload whenever the selected anchor changes; reset any in-progress draft.
+  // Reload whenever the selected anchor or translation changes; reset any
+  // in-progress draft.
   useEffect(() => {
     setEditing(null);
     setDraftTitle("");
     setDraftBody("");
-    listNotes(anchor)
+    listNotes(anchor, translationId)
       .then(setNotes)
       .catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+  }, [key, translationId]);
 
   function refresh() {
-    listNotes(anchor)
+    listNotes(anchor, translationId)
       .then(setNotes)
       .catch((e) => setError(String(e)));
     onChanged();
@@ -162,7 +166,16 @@ export default function NotesPanel({
               onCancel={() => setEditing(null)}
             />
           ) : (
-            <article key={n.note_id} className="note">
+            <article
+              key={n.note_id}
+              className={n.degraded ? "note degraded" : "note"}
+            >
+              {n.degraded && (
+                <p className="degraded-label">
+                  originally on the word “{n.surface}”
+                  {n.origin_abbrev ? ` in ${n.origin_abbrev}` : ""}
+                </p>
+              )}
               {n.title && <h4>{n.title}</h4>}
               <p className="note-body">{n.body}</p>
               <div className="note-meta">
