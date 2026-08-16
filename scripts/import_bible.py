@@ -77,8 +77,9 @@ def default_db_path() -> Path:
 
 
 def migration_sql() -> str:
-    path = Path(__file__).resolve().parent.parent / "src-tauri" / "migrations" / "0001_init.sql"
-    return path.read_text(encoding="utf-8")
+    """All migrations, in order — the same set the app applies on start."""
+    folder = Path(__file__).resolve().parent.parent / "src-tauri" / "migrations"
+    return "\n".join(p.read_text(encoding="utf-8") for p in sorted(folder.glob("*.sql")))
 
 
 def fetch_book(slug: str, nr: int) -> dict:

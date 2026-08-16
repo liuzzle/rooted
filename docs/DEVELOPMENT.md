@@ -15,20 +15,31 @@ See the full build plan in [`docs/PLAN.md`](./PLAN.md).
 
 ```bash
 npm install
-
-# Import a public-domain translation (World English Bible) into the app DB.
-# Writes to the same SQLite file the app reads:
-#   macOS: ~/Library/Application Support/com.rooted.app/rooted.db
-python3 scripts/import_bible.py                 # WEB (default)
-# python3 scripts/import_bible.py --translation kjv   # (Phase 2)
+npm run tauri dev
 ```
+
+On first run the app has no Bible: open **Translations…** and download one.
+Packs come from the registry in `src-tauri/packs/registry.json` (freely
+distributable texts only) and are imported straight into the canonical model.
+
+`scripts/import_bible.py` does the same thing from the command line — useful for
+seeding a database without launching the app:
+
+```bash
+python3 scripts/import_bible.py                      # WEB (default)
+python3 scripts/import_bible.py --translation kjv
+```
+
+Both importers tokenize identically; a test asserts it, because a mismatch
+would shift token indices and move every word anchor.
 
 ## Run
 
 ```bash
 npm run tauri dev      # launches the desktop app (Rust build + Vite UI)
 npm run build          # typecheck + build the frontend only
-cargo test --manifest-path src-tauri/Cargo.toml   # data-layer tests
+cargo test --manifest-path src-tauri/Cargo.toml              # data-layer tests
+cargo test --manifest-path src-tauri/Cargo.toml -- --ignored # + network tests
 ```
 
 The database path can be overridden for both the app and the import script via
@@ -38,11 +49,13 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 
 | Path | Purpose |
 |------|---------|
-| `src/` | React UI. `src/features/reader/` (reading pane), `src/features/notes/` (notes & highlight panel), `src/lib/api.ts` (typed Tauri commands). |
+| `src/` | React UI. `src/features/reader/` (reading pane), `src/features/notes/` (notes & highlights), `src/features/translations/` (pack manager), `src/lib/api.ts` (typed Tauri commands). |
 | `src-tauri/src/db.rs` | SQLite access + query commands (with unit tests). |
+| `src-tauri/src/packs.rs` | Pack registry, download, tokenizer, import. |
 | `src-tauri/src/lib.rs` | Tauri command registration + app setup. |
-| `src-tauri/migrations/0001_init.sql` | Canonical schema (books, translations, verses, tokens, notes, highlights). |
-| `scripts/import_bible.py` | Parse a getbible.net translation → canonical BCV + token rows. |
+| `src-tauri/migrations/` | Schema, applied in filename order on every start (each migration is idempotent). |
+| `src-tauri/packs/registry.json` | Downloadable translations. |
+| `scripts/import_bible.py` | Command-line equivalent of the in-app pack import. |
 
 ## Data model notes
 
@@ -55,3 +68,15 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
   translation they were made in.
 - One highlight per anchor: setting a colour replaces the previous one, and
   clicking the active colour (or the slashed swatch) removes it.
+
+## Switching translations (Tier-1 anchoring)
+
+- Verse notes and highlights follow you into every translation.
+- A word note is never re-pointed at a word it wasn't written on. Read another
+  translation and it appears on the **verse**, labelled *“originally on the word
+  ‘X’ in WEB”*, with a hollow indicator dot. Switch back and it returns to its
+  word. Strong's-based alignment (Tier 2) comes in Phase 7.
+- Word *highlights* are simply not painted outside their own translation.
+- Removing a pack deletes its verses and tokens but keeps its `translations`
+  row, so notes written against it keep resolving and a reinstall lands on the
+  same `translation_id`.
