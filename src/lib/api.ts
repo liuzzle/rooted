@@ -275,6 +275,96 @@ export function setLastRead(position: string): Promise<void> {
   return invoke("set_last_read", { position });
 }
 
+// --- ingestion -------------------------------------------------------------
+
+export type JobState =
+  | "UPLOADED"
+  | "EXTRACTING"
+  | "NEEDS_REVIEW"
+  | "VERIFIED"
+  | "DONE"
+  | "ERROR";
+
+/** Metadata captured at upload; it rides into the note and its citations. */
+export interface DocumentMeta {
+  title: string | null;
+  doc_date: string | null;
+  speaker: string | null;
+  context: string | null;
+}
+
+export interface Job {
+  job_id: number;
+  doc_id: number;
+  state: JobState;
+  engine_used: string | null;
+  confidence: number | null;
+  attempts: number;
+  last_error: string | null;
+  note_id: number | null;
+  created_at: string;
+  updated_at: string;
+  filename: string;
+  format: string;
+  byte_size: number;
+  title: string | null;
+  doc_date: string | null;
+  speaker: string | null;
+  context: string | null;
+  has_text: boolean;
+  verified: boolean;
+  edited: boolean;
+  preview: string | null;
+}
+
+export interface JobDetail extends Job {
+  text: string | null;
+}
+
+export interface WorkerStatus {
+  running: boolean;
+  last_heartbeat: string | null;
+  problem: string | null;
+}
+
+export function uploadDocument(
+  filename: string,
+  bytes: Uint8Array,
+  meta: DocumentMeta,
+): Promise<number> {
+  // Tauri serialises the payload as JSON, so send plain numbers.
+  return invoke("upload_document", {
+    filename,
+    bytes: Array.from(bytes),
+    meta,
+  });
+}
+
+export function listJobs(): Promise<Job[]> {
+  return invoke("list_jobs");
+}
+
+export function getJob(jobId: number): Promise<JobDetail> {
+  return invoke("get_job", { jobId });
+}
+
+/** Accept extracted text (with corrections). The only route to a note. */
+export function verifyJob(jobId: number, text: string): Promise<void> {
+  return invoke("verify_job", { jobId, text });
+}
+
+export function retryJob(jobId: number): Promise<void> {
+  return invoke("retry_job", { jobId });
+}
+
+export function deleteJob(jobId: number): Promise<void> {
+  return invoke("delete_job", { jobId });
+}
+
+export function getWorkerStatus(): Promise<WorkerStatus> {
+  return invoke("worker_status");
+}
+
 // --- translation packs -----------------------------------------------------
 
 export interface Pack {
