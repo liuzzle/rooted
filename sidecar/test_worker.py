@@ -17,6 +17,55 @@ from pathlib import Path
 import worker as w
 
 
+def _vision_available() -> bool:
+    import engines
+
+    return engines.vision_available()
+
+
+def _render_page(path: Path) -> Path:
+    """Draw a page of note-like text so OCR has something real to read.
+
+    Uses Quartz directly — no image library, and no checked-in binary fixture
+    that could drift from what the engine actually sees.
+    """
+    import Quartz
+    from Foundation import NSURL
+
+    width, height = 1000, 700
+    space = Quartz.CGColorSpaceCreateDeviceRGB()
+    ctx = Quartz.CGBitmapContextCreate(
+        None, width, height, 8, 0, space,
+        Quartz.kCGImageAlphaPremultipliedFirst | Quartz.kCGBitmapByteOrder32Host,
+    )
+    Quartz.CGContextSetRGBFillColor(ctx, 1, 1, 1, 1)
+    Quartz.CGContextFillRect(ctx, Quartz.CGRectMake(0, 0, width, height))
+    Quartz.CGContextSetRGBFillColor(ctx, 0, 0, 0, 1)
+    Quartz.CGContextSetTextMatrix(ctx, Quartz.CGAffineTransformIdentity)
+
+    # (text, x, y-from-bottom, size)
+    lines = [
+        ("Covenant - Abraham", 60, 620, 36),
+        ("promise repeated to Isaac", 100, 540, 28),
+        ("and again to Jacob", 100, 490, 28),
+        ("see Galatians 3", 140, 420, 26),
+        ("cf. Romans 4", 640, 380, 24),
+        ("fulfilled in Christ", 100, 260, 30),
+    ]
+    for text, x, y, size in lines:
+        Quartz.CGContextSelectFont(ctx, b"Helvetica", size, Quartz.kCGEncodingMacRoman)
+        Quartz.CGContextSetTextDrawingMode(ctx, Quartz.kCGTextFill)
+        Quartz.CGContextShowTextAtPoint(ctx, x, y, text.encode("mac-roman"), len(text))
+
+    image = Quartz.CGBitmapContextCreateImage(ctx)
+    dest = Quartz.CGImageDestinationCreateWithURL(
+        NSURL.fileURLWithPath_(str(path)), "public.png", 1, None
+    )
+    Quartz.CGImageDestinationAddImage(dest, image, None)
+    Quartz.CGImageDestinationFinalize(dest)
+    return path
+
+
 def make_docx(path: Path, paragraphs: list[str]) -> None:
     """A minimal but real .docx — a zip holding WordprocessingML."""
     body = "".join(
@@ -263,6 +312,65 @@ class PipelineTest(unittest.TestCase):
         self.assertIsNotNone(first)
         self.assertIsNone(second, "the job was already claimed")
         self.assertEqual(first["job_id"], job_id)
+
+    # -- scans --------------------------------------------------------------
+
+    def test_a_scan_produces_positioned_spans_and_a_page(self):
+        if not _vision_available():
+            self.skipTest("Vision bindings not installed")
+        image = _render_page(self.dir / "page.png")
+        job_id = self.upload("page.png", image.read_bytes())
+        self.worker.tick()
+
+        self.assertEqual(self.state(job_id), w.NEEDS_REVIEW)
+        doc_id = self.conn.execute(
+            "SELECT doc_id FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()["doc_id"]
+
+        pages = self.conn.execute(
+            "SELECT * FROM pages WHERE doc_id = ?", (doc_id,)
+        ).fetchall()
+        self.assertEqual(len(pages), 1)
+        self.assertEqual(pages[0]["width"], 1000)
+
+        spans = self.conn.execute(
+            "SELECT * FROM spans WHERE doc_id = ? ORDER BY idx", (doc_id,)
+        ).fetchall()
+        self.assertGreaterEqual(len(spans), 3)
+        # Every span knows where it was on the page.
+        for span in spans:
+            for axis in ("x", "y", "w", "h"):
+                self.assertIsNotNone(span[axis])
+                self.assertGreaterEqual(span[axis], 0.0)
+                self.assertLessEqual(span[axis], 1.0)
+        # The margin note is off to the right, not folded into the main column.
+        margin = [s for s in spans if "Romans" in s["text"]]
+        self.assertTrue(margin, f"expected a margin span, got {[s['text'] for s in spans]}")
+        self.assertGreater(margin[0]["x"], 0.5)
+
+    def test_a_scan_is_never_auto_verified(self):
+        if not _vision_available():
+            self.skipTest("Vision bindings not installed")
+        image = _render_page(self.dir / "page.png")
+        job_id = self.upload("page.png", image.read_bytes())
+        # Even told to auto-verify, OCR output must be read by a person: the
+        # engine reports full confidence for readings that are plainly wrong.
+        w.Worker(self.conn, lease=60, auto_verify=True).tick()
+        self.assertEqual(self.state(job_id), w.NEEDS_REVIEW)
+
+    def test_audio_without_an_engine_says_so(self):
+        job_id = self.upload("talk.mp3", b"not really audio")
+        self.worker.tick()
+        if w.kind_of("mp3") != "audio":
+            self.fail("mp3 should be audio")
+        state = self.state(job_id)
+        if state == w.NEEDS_REVIEW:
+            self.skipTest("faster-whisper is installed; nothing to assert here")
+        self.assertEqual(state, w.ERROR)
+        error = self.conn.execute(
+            "SELECT last_error FROM jobs WHERE job_id = ?", (job_id,)
+        ).fetchone()["last_error"]
+        self.assertIn("faster-whisper", error)
 
     # -- auto-verify --------------------------------------------------------
 

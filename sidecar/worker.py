@@ -28,17 +28,26 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import io
 import os
-import re
 import sqlite3
 import sys
 import time
 import uuid
-import zipfile
 from pathlib import Path
 from typing import Optional
-from xml.etree import ElementTree
+
+from engines import (
+    EngineUnavailable,
+    Extraction,
+    ExtractionError,
+    confidence_of_decode,
+    extract_docx,
+    extract_pdf_text_layer,
+    extract_plain_text,
+    ocr_image,
+    ocr_pdf,
+    transcribe_audio,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -56,9 +65,6 @@ MAX_ATTEMPTS = 3
 DEFAULT_LEASE = 120
 # Poll interval when following the queue.
 DEFAULT_INTERVAL = 2.0
-
-WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-
 
 # ---------------------------------------------------------------------------
 # Database
@@ -88,108 +94,72 @@ def connect(db_path: Path) -> sqlite3.Connection:
 
 
 def apply_migrations(conn: sqlite3.Connection) -> None:
-    """Apply the app's migrations (all idempotent) so the worker can run against
-    a fresh database on its own."""
+    """Apply the app's migrations so the worker can run against a fresh
+    database on its own.
+
+    Uses the same `schema_migrations` ledger the Rust side keeps — not every
+    migration is idempotent (`ALTER TABLE ADD COLUMN` isn't), so whichever
+    process gets there first records it and the other skips it.
+    """
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS schema_migrations (
+             name       TEXT PRIMARY KEY,
+             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+           )"""
+    )
+    applied = {
+        row["name"] for row in conn.execute("SELECT name FROM schema_migrations")
+    }
     folder = REPO_ROOT / "src-tauri" / "migrations"
     for path in sorted(folder.glob("*.sql")):
+        name = path.stem
+        if name in applied:
+            continue
         conn.executescript(path.read_text(encoding="utf-8"))
+        conn.execute("INSERT INTO schema_migrations (name) VALUES (?)", (name,))
 
 
 # ---------------------------------------------------------------------------
 # Extraction — typed documents only (Phase 3)
 # ---------------------------------------------------------------------------
 
-class ExtractionError(Exception):
-    """The document can't be read at all. The job goes to ERROR."""
+IMAGE_FORMATS = {"jpg", "jpeg", "png", "heic", "tiff", "tif"}
+AUDIO_FORMATS = {"mp3", "m4a", "wav", "aiff", "flac"}
 
 
-def extract_text(path: Path, fmt: str) -> tuple[str, str, float]:
-    """Return (text, engine, confidence in 0..1) for a typed document.
+def kind_of(fmt: str) -> str:
+    """Which engine family reads this format (mirrors src-tauri/src/ingest.rs)."""
+    if fmt in IMAGE_FORMATS:
+        return "image"
+    if fmt in AUDIO_FORMATS:
+        return "audio"
+    return "typed"
 
-    Confidence describes how sure we are the *text* is complete and correct —
-    not how good the content is. A clean decode is 1.0; anything that had to be
-    guessed at drops below the auto-accept line so a human looks at it.
+
+def read_document(path: Path, fmt: str, pages_dir: Path) -> Extraction:
+    """Dispatch a document to the engine that can read it.
+
+    A PDF is tried as a typed document first and falls back to OCR: a scan
+    saved as PDF is the common case, and the two are indistinguishable by
+    extension.
     """
     if fmt in ("txt", "md"):
         return extract_plain_text(path)
     if fmt == "docx":
         return extract_docx(path)
     if fmt == "pdf":
-        return extract_pdf(path)
-    raise ExtractionError(f"no extractor for '{fmt}' documents")
-
-
-def extract_plain_text(path: Path) -> tuple[str, str, float]:
-    raw = path.read_bytes()
-    try:
-        return raw.decode("utf-8"), "text/utf-8", 1.0
-    except UnicodeDecodeError:
-        # Some other encoding. latin-1 always decodes, so flag it for review:
-        # accented characters may well be wrong.
-        return raw.decode("latin-1"), "text/latin-1", 0.6
-
-
-def extract_docx(path: Path) -> tuple[str, str, float]:
-    """Pull paragraph text out of a .docx with the standard library.
-
-    A .docx is a zip of XML; `w:p` is a paragraph and `w:t` a run of text. This
-    reads exactly those and joins them — no interpretation.
-    """
-    try:
-        with zipfile.ZipFile(path) as zf:
-            xml = zf.read("word/document.xml")
-    except (zipfile.BadZipFile, KeyError) as exc:
-        raise ExtractionError(f"not a readable .docx: {exc}") from exc
-
-    root = ElementTree.fromstring(xml)
-    paragraphs = []
-    for para in root.iter(f"{WORD_NS}p"):
-        runs = [node.text or "" for node in para.iter(f"{WORD_NS}t")]
-        # An explicit <w:br/> or <w:tab/> is whitespace we should keep.
-        if para.find(f".//{WORD_NS}tab") is not None and runs:
-            runs = ["\t".join(runs)]
-        paragraphs.append("".join(runs))
-
-    text = "\n".join(paragraphs).strip()
-    if not text:
-        raise ExtractionError("the document has no text (an image-only file?)")
-    return text, "docx/xml", 1.0
-
-
-def extract_pdf(path: Path) -> tuple[str, str, float]:
-    """Text-layer extraction. A scanned PDF has no text layer — that is Phase 4
-    (OCR), so here it is reported rather than guessed at."""
-    try:
-        from pypdf import PdfReader  # type: ignore
-    except ImportError:
         try:
-            from PyPDF2 import PdfReader  # type: ignore
-        except ImportError as exc:
-            raise ExtractionError(
-                "reading PDFs needs pypdf — `pip install pypdf` — or convert the "
-                "file to .txt/.docx"
-            ) from exc
-
-    reader = PdfReader(str(path))
-    pages = [(page.extract_text() or "") for page in reader.pages]
-    text = "\n\n".join(p.strip() for p in pages if p.strip()).strip()
-    if not text:
-        raise ExtractionError(
-            "this PDF has no text layer — it looks scanned, which needs OCR "
-            "(Phase 4)"
-        )
-    # Sparse text usually means a partial text layer over a scan.
-    per_page = len(text) / max(1, len(pages))
-    confidence = 1.0 if per_page >= 200 else max(0.3, per_page / 200)
-    return text, "pdf/text-layer", confidence
-
-
-def confidence_of_decode(text: str) -> float:
-    """Replacement characters mean bytes were lost in decoding."""
-    if not text:
-        return 0.0
-    bad = text.count("�")
-    return max(0.0, 1.0 - (bad / max(1, len(text))) * 10)
+            return extract_pdf_text_layer(path)
+        except EngineUnavailable:
+            raise
+        except ExtractionError:
+            # No text layer: it's a scan. OCR it, keeping the rendered pages.
+            return ocr_pdf(path, pages_dir)
+    if kind_of(fmt) == "image":
+        return ocr_image(path)
+    if kind_of(fmt) == "audio":
+        return transcribe_audio(path)
+    raise ExtractionError(f"no engine reads '{fmt}' files")
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +263,10 @@ class Worker:
         try:
             if not path.exists():
                 raise ExtractionError(f"the uploaded file is missing: {path}")
-            text, engine, confidence = extract_text(path, job["format"])
-            confidence = min(confidence, confidence_of_decode(text))
+            extraction = read_document(path, job["format"], self.pages_dir(job))
+            extraction.confidence = min(
+                extraction.confidence, confidence_of_decode(extraction.text)
+            )
         except ExtractionError as exc:
             self.set_state(job_id, ERROR, last_error=str(exc),
                            claimed_by=None, claimed_at=None)
@@ -304,18 +276,17 @@ class Worker:
                            claimed_by=None, claimed_at=None)
             return
 
-        # One extraction row per job: re-running this stage replaces it.
-        self.conn.execute(
-            """INSERT INTO extractions (job_id, text, engine, confidence, verified)
-               VALUES (?, ?, ?, ?, 0)
-               ON CONFLICT(job_id) DO UPDATE SET
-                 text = excluded.text, engine = excluded.engine,
-                 confidence = excluded.confidence,
-                 verified = 0, edited = 0, updated_at = datetime('now')""",
-            (job_id, text, engine, confidence),
-        )
+        self.store_extraction(job, extraction)
 
-        auto = self.auto_verify and confidence >= 1.0
+        # A scan or a recording is never accepted on the machine's say-so,
+        # however confident it claims to be: on-device OCR reports 1.0 for
+        # readings that are plainly wrong, and a transcript is a reading of
+        # sound, not a copy of text. Only typed documents can auto-pass.
+        auto = (
+            self.auto_verify
+            and extraction.confidence >= 1.0
+            and kind_of(job["format"]) == "typed"
+        )
         if auto:
             self.conn.execute(
                 "UPDATE extractions SET verified = 1, updated_at = datetime('now')"
@@ -325,12 +296,61 @@ class Worker:
         self.set_state(
             job_id,
             VERIFIED if auto else NEEDS_REVIEW,
-            engine_used=engine,
-            confidence=confidence,
+            engine_used=extraction.engine,
+            confidence=extraction.confidence,
             last_error=None,
             claimed_by=None,
             claimed_at=None,
         )
+
+    def pages_dir(self, job: sqlite3.Row) -> Path:
+        """Where rendered page images live, beside the uploaded documents."""
+        return Path(job["stored_path"]).parent / "pages"
+
+    def store_extraction(self, job: sqlite3.Row, extraction: Extraction) -> None:
+        """Write the text, its pages and its spans as one transaction.
+
+        Re-running a stage replaces all three, so an extraction can never be
+        half-old: the spans always describe the text that is stored with them.
+        """
+        job_id, doc_id = job["job_id"], job["doc_id"]
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            self.conn.execute(
+                """INSERT INTO extractions (job_id, text, engine, confidence, verified)
+                   VALUES (?, ?, ?, ?, 0)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                     text = excluded.text, engine = excluded.engine,
+                     confidence = excluded.confidence,
+                     verified = 0, edited = 0, updated_at = datetime('now')""",
+                (job_id, extraction.text, extraction.engine, extraction.confidence),
+            )
+            self.conn.execute("DELETE FROM spans WHERE doc_id = ?", (doc_id,))
+            self.conn.execute("DELETE FROM pages WHERE doc_id = ?", (doc_id,))
+
+            page_ids: dict[int, int] = {}
+            for page in extraction.pages:
+                cur = self.conn.execute(
+                    """INSERT INTO pages (doc_id, page_no, image_path, width, height)
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (doc_id, page.page_no, page.image_path, page.width, page.height),
+                )
+                page_ids[page.page_no] = cur.lastrowid
+
+            for span in extraction.spans:
+                self.conn.execute(
+                    """INSERT INTO spans
+                         (doc_id, page_id, idx, text, confidence, x, y, w, h,
+                          start_s, end_s, speaker)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (doc_id, page_ids.get(span.page_no or -1), span.idx, span.text,
+                     span.confidence, span.x, span.y, span.w, span.h,
+                     span.start_s, span.end_s, span.speaker),
+                )
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
 
     def publish(self, job: sqlite3.Row) -> None:
         """VERIFIED → DONE: turn human-accepted text into a note.
@@ -366,9 +386,10 @@ class Worker:
                 note_id = job["note_id"]
             else:
                 cur = self.conn.execute(
-                    """INSERT INTO notes (title, body, date, speaker, context)
-                       VALUES (?, ?, ?, ?, ?)""",
-                    (title, body, job["doc_date"], job["speaker"], job["context"]),
+                    """INSERT INTO notes (title, body, date, speaker, context, doc_id)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (title, body, job["doc_date"], job["speaker"], job["context"],
+                     job["doc_id"]),
                 )
                 note_id = cur.lastrowid
             self.conn.execute(

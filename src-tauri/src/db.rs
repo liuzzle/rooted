@@ -30,10 +30,11 @@ pub fn open() -> Result<Connection, String> {
 
 /// Every migration, in order. Each is written to be idempotent (`IF NOT
 /// EXISTS`), so applying the whole list on every start is safe.
-const MIGRATIONS: &[&str] = &[
-    include_str!("../migrations/0001_init.sql"),
-    include_str!("../migrations/0002_settings.sql"),
-    include_str!("../migrations/0003_ingestion.sql"),
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("../migrations/0001_init.sql")),
+    ("0002_settings", include_str!("../migrations/0002_settings.sql")),
+    ("0003_ingestion", include_str!("../migrations/0003_ingestion.sql")),
+    ("0004_pages_spans", include_str!("../migrations/0004_pages_spans.sql")),
 ];
 
 /// Enable foreign keys and apply the canonical schema (idempotent).
@@ -45,11 +46,36 @@ pub fn apply_schema(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          PRAGMA journal_mode = WAL;
-         PRAGMA busy_timeout = 5000;",
+         PRAGMA busy_timeout = 5000;
+         CREATE TABLE IF NOT EXISTS schema_migrations (
+           name       TEXT PRIMARY KEY,
+           applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+         );",
     )
     .map_err(|e| e.to_string())?;
-    for migration in MIGRATIONS {
-        conn.execute_batch(migration).map_err(|e| e.to_string())?;
+
+    // Applied once and recorded. The early migrations are individually
+    // idempotent, but `ALTER TABLE ADD COLUMN` is not — hence the ledger.
+    for (name, sql) in MIGRATIONS {
+        let applied: bool = conn
+            .query_row(
+                "SELECT 1 FROM schema_migrations WHERE name = ?1",
+                rusqlite::params![name],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+        if applied {
+            continue;
+        }
+        conn.execute_batch(sql)
+            .map_err(|e| format!("migration {name} failed: {e}"))?;
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (?1)",
+            rusqlite::params![name],
+        )
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }

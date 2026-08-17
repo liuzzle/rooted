@@ -103,11 +103,52 @@ pub struct Job {
     pub preview: Option<String>,
 }
 
+/// A page of a scanned document, as shown in review.
+#[derive(Serialize)]
+pub struct Page {
+    pub page_id: i64,
+    pub page_no: i64,
+    pub image_path: String,
+    pub width: i64,
+    pub height: i64,
+}
+
+/// A recognised piece of text, anchored where it was found: a box on the page
+/// for a scan, a stretch of time for a recording.
+#[derive(Serialize)]
+pub struct Span {
+    pub span_id: i64,
+    pub page_id: Option<i64>,
+    pub page_no: Option<i64>,
+    pub idx: i64,
+    pub text: String,
+    pub confidence: Option<f64>,
+    pub x: Option<f64>,
+    pub y: Option<f64>,
+    pub w: Option<f64>,
+    pub h: Option<f64>,
+    pub start_s: Option<f64>,
+    pub end_s: Option<f64>,
+    pub speaker: Option<String>,
+    pub edited: bool,
+}
+
+/// One span's text as the reviewer left it.
+#[derive(serde::Deserialize)]
+pub struct SpanEdit {
+    pub span_id: i64,
+    pub text: String,
+}
+
 #[derive(Serialize)]
 pub struct JobDetail {
     #[serde(flatten)]
     pub job: Job,
     pub text: Option<String>,
+    /// "typed" | "image" | "audio" — which review UI this job needs.
+    pub kind: String,
+    pub pages: Vec<Page>,
+    pub spans: Vec<Span>,
 }
 
 const JOB_COLUMNS: &str = "SELECT j.job_id, j.doc_id, j.state, j.engine_used, j.confidence,
@@ -158,20 +199,41 @@ fn map_job(r: &rusqlite::Row) -> rusqlite::Result<(Job, Option<String>)> {
 // Upload
 // ---------------------------------------------------------------------------
 
-/// File extensions this phase can read. Handwriting and audio arrive in Phase 4.
-pub const SUPPORTED_FORMATS: [&str; 4] = ["txt", "md", "docx", "pdf"];
+/// Typed documents — text comes straight out of the file.
+pub const TYPED_FORMATS: [&str; 4] = ["txt", "md", "docx", "pdf"];
+/// Scans and photos — text comes from OCR, with positions on the page.
+pub const IMAGE_FORMATS: [&str; 6] = ["jpg", "jpeg", "png", "heic", "tiff", "tif"];
+/// Recordings — text comes from transcription, with times and speakers.
+pub const AUDIO_FORMATS: [&str; 5] = ["mp3", "m4a", "wav", "aiff", "flac"];
+
+/// What kind of source a document is, which decides both the engine that reads
+/// it and the shape of the review UI.
+pub fn kind_of(format: &str) -> &'static str {
+    if IMAGE_FORMATS.contains(&format) {
+        "image"
+    } else if AUDIO_FORMATS.contains(&format) {
+        "audio"
+    } else {
+        "typed"
+    }
+}
 
 pub fn format_of(filename: &str) -> Result<String, String> {
     let ext = filename
         .rsplit_once('.')
         .map(|(_, ext)| ext.to_ascii_lowercase())
         .unwrap_or_default();
-    if SUPPORTED_FORMATS.contains(&ext.as_str()) {
+    if TYPED_FORMATS.contains(&ext.as_str())
+        || IMAGE_FORMATS.contains(&ext.as_str())
+        || AUDIO_FORMATS.contains(&ext.as_str())
+    {
         Ok(ext)
     } else {
         Err(format!(
-            "'{filename}' isn't a typed document this phase can read (expected {})",
-            SUPPORTED_FORMATS.join(", ")
+            "'{filename}' isn't a format Rooted can read (documents: {}; scans: {}; audio: {})",
+            TYPED_FORMATS.join(", "),
+            IMAGE_FORMATS.join(", "),
+            AUDIO_FORMATS.join(", "),
         ))
     }
 }
@@ -235,12 +297,79 @@ pub fn get_job(conn: &Connection, job_id: i64) -> Result<JobDetail, String> {
     let mut stmt = conn
         .prepare(&format!("{JOB_COLUMNS} WHERE j.job_id = ?1"))
         .map_err(|e| e.to_string())?;
-    stmt.query_row(rusqlite::params![job_id], |r| {
-        map_job(r).map(|(job, text)| JobDetail { job, text })
+    let (job, text) = stmt
+        .query_row(rusqlite::params![job_id], map_job)
+        .optional()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("job {job_id} not found"))?;
+
+    let kind = kind_of(&job.format).to_string();
+    let pages = list_pages(conn, job.doc_id)?;
+    let spans = list_spans(conn, job.doc_id)?;
+    Ok(JobDetail {
+        job,
+        text,
+        kind,
+        pages,
+        spans,
     })
-    .optional()
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| format!("job {job_id} not found"))
+}
+
+pub fn list_pages(conn: &Connection, doc_id: i64) -> Result<Vec<Page>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT page_id, page_no, image_path, width, height FROM pages
+              WHERE doc_id = ?1 ORDER BY page_no",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![doc_id], |r| {
+            Ok(Page {
+                page_id: r.get(0)?,
+                page_no: r.get(1)?,
+                image_path: r.get(2)?,
+                width: r.get(3)?,
+                height: r.get(4)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|e| e.to_string())
+}
+
+pub fn list_spans(conn: &Connection, doc_id: i64) -> Result<Vec<Span>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.span_id, s.page_id, p.page_no, s.idx, s.text, s.confidence,
+                    s.x, s.y, s.w, s.h, s.start_s, s.end_s, s.speaker, s.edited
+               FROM spans s
+               LEFT JOIN pages p ON p.page_id = s.page_id
+              WHERE s.doc_id = ?1
+              ORDER BY s.idx",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(rusqlite::params![doc_id], |r| {
+            Ok(Span {
+                span_id: r.get(0)?,
+                page_id: r.get(1)?,
+                page_no: r.get(2)?,
+                idx: r.get(3)?,
+                text: r.get(4)?,
+                confidence: r.get(5)?,
+                x: r.get(6)?,
+                y: r.get(7)?,
+                w: r.get(8)?,
+                h: r.get(9)?,
+                start_s: r.get(10)?,
+                end_s: r.get(11)?,
+                speaker: r.get(12)?,
+                edited: r.get::<_, i64>(13)? == 1,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>();
+    rows.map_err(|e| e.to_string())
 }
 
 /// The stored file path, so the caller can delete it with the record.
@@ -317,6 +446,93 @@ pub fn save_verification(conn: &mut Connection, job_id: i64, text: &str) -> Resu
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Accept a scan or recording, span by span.
+///
+/// Each span keeps its own text, box and confidence, so corrections stay
+/// attached to the place they belong on the page. The extraction text — what
+/// becomes the note body and what search will index — is rebuilt from the spans
+/// in reading order, so it can never drift from what the reviewer actually saw.
+///
+/// A span may be emptied (a stray mark the engine read as a word); it is kept,
+/// so the page's spans still line up with what's on it, but contributes nothing.
+pub fn save_span_verification(
+    conn: &mut Connection,
+    job_id: i64,
+    edits: &[SpanEdit],
+) -> Result<(), String> {
+    let state = current_state(conn, job_id)?;
+    if !matches!(state, JobState::NeedsReview | JobState::Verified) {
+        return Err(format!(
+            "job {job_id} is {state}; only a job awaiting review can be verified"
+        ));
+    }
+    let doc_id: i64 = conn
+        .query_row(
+            "SELECT doc_id FROM jobs WHERE job_id = ?1",
+            rusqlite::params![job_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if edits.iter().all(|e| e.text.trim().is_empty()) {
+        return Err("a verified document can't be empty".into());
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    {
+        let mut update = tx
+            .prepare(
+                "UPDATE spans
+                    SET text = ?2,
+                        edited = CASE WHEN text <> ?2 THEN 1 ELSE edited END
+                  WHERE span_id = ?1 AND doc_id = ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        for edit in edits {
+            let changed = update
+                .execute(rusqlite::params![edit.span_id, edit.text, doc_id])
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err(format!(
+                    "span {} does not belong to this document",
+                    edit.span_id
+                ));
+            }
+        }
+    }
+
+    // Rebuild the reviewed text from the spans themselves.
+    let text: String = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT text FROM spans WHERE doc_id = ?1 AND trim(text) <> '' ORDER BY idx",
+            )
+            .map_err(|e| e.to_string())?;
+        let lines = stmt
+            .query_map(rusqlite::params![doc_id], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        lines.join("\n")
+    };
+
+    tx.execute(
+        "UPDATE extractions SET text = ?2, verified = 1,
+                edited = (SELECT MAX(edited) FROM spans WHERE doc_id = ?3),
+                updated_at = datetime('now')
+          WHERE job_id = ?1",
+        rusqlite::params![job_id, text, doc_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "UPDATE jobs SET state = ?2, last_error = NULL, updated_at = datetime('now')
+          WHERE job_id = ?1",
+        rusqlite::params![job_id, JobState::Verified.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
 /// Push a failed job back to the front of the queue.
 pub fn retry_job(conn: &Connection, job_id: i64) -> Result<(), String> {
     let state = current_state(conn, job_id)?;
@@ -334,19 +550,70 @@ pub fn retry_job(conn: &Connection, job_id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Delete a job, its document row and its extraction. A note that was already
-/// created is left alone — it is the user's, not the pipeline's.
-pub fn delete_job(conn: &Connection, job_id: i64) -> Result<(), String> {
-    let changed = conn
-        .execute(
-            "DELETE FROM documents WHERE doc_id = (SELECT doc_id FROM jobs WHERE job_id = ?1)",
+/// Delete a job.
+///
+/// A note that was already created is left alone — it is the user's, not the
+/// pipeline's. If that note came off a scanned page, the document, its page
+/// images and its spans are kept too, because the note *is* the page plus what
+/// was read off it. Otherwise the source document goes with the job.
+///
+/// Returns the file paths that are no longer referenced, for the caller to
+/// remove from disk.
+pub fn delete_job(conn: &mut Connection, job_id: i64) -> Result<Vec<String>, String> {
+    let row: Option<(i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT doc_id, note_id FROM jobs WHERE job_id = ?1",
             rusqlite::params![job_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let (doc_id, note_id) = row.ok_or_else(|| format!("job {job_id} not found"))?;
+
+    // Is the document still the source of a note?
+    let referenced: bool = note_id.is_some()
+        && conn
+            .query_row(
+                "SELECT 1 FROM notes WHERE doc_id = ?1",
+                rusqlite::params![doc_id],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(false);
+
+    let mut orphaned = Vec::new();
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    if !referenced {
+        let mut stmt = tx
+            .prepare("SELECT stored_path FROM documents WHERE doc_id = ?1")
+            .map_err(|e| e.to_string())?;
+        orphaned.extend(
+            stmt.query_map(rusqlite::params![doc_id], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?,
+        );
+        let mut stmt = tx
+            .prepare("SELECT image_path FROM pages WHERE doc_id = ?1")
+            .map_err(|e| e.to_string())?;
+        orphaned.extend(
+            stmt.query_map(rusqlite::params![doc_id], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?,
+        );
+        tx.execute(
+            "DELETE FROM documents WHERE doc_id = ?1",
+            rusqlite::params![doc_id],
         )
         .map_err(|e| e.to_string())?;
-    if changed == 0 {
-        return Err(format!("job {job_id} not found"));
+    } else {
+        tx.execute("DELETE FROM jobs WHERE job_id = ?1", rusqlite::params![job_id])
+            .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(orphaned)
 }
 
 /// Counts by state, for the pipeline summary strip.
@@ -407,12 +674,20 @@ mod tests {
     }
 
     #[test]
-    fn only_typed_document_formats_are_accepted() {
+    fn formats_map_to_the_engine_and_review_ui_they_need() {
         assert_eq!(format_of("notes.TXT").unwrap(), "txt");
         assert_eq!(format_of("talk.docx").unwrap(), "docx");
-        // Phase 4 formats are deliberately refused here.
-        assert!(format_of("sermon.mp3").is_err());
-        assert!(format_of("scan.jpg").is_err());
+        assert_eq!(format_of("scan.JPG").unwrap(), "jpg");
+        assert_eq!(format_of("sermon.mp3").unwrap(), "mp3");
+
+        assert_eq!(kind_of("txt"), "typed");
+        assert_eq!(kind_of("pdf"), "typed");
+        assert_eq!(kind_of("jpg"), "image");
+        assert_eq!(kind_of("heic"), "image");
+        assert_eq!(kind_of("mp3"), "audio");
+        assert_eq!(kind_of("wav"), "audio");
+
+        assert!(format_of("clip.mov").is_err(), "video isn't supported");
         assert!(format_of("noextension").is_err());
     }
 
@@ -511,7 +786,7 @@ mod tests {
         )
         .unwrap();
 
-        delete_job(&conn, job_id).unwrap();
+        delete_job(&mut conn, job_id).unwrap();
         assert!(list_jobs(&conn).unwrap().is_empty());
         assert_eq!(
             db::list_all_notes(&conn, 1, None, None, 10).unwrap().len(),
@@ -522,6 +797,206 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM extractions", [], |r| r.get(0))
             .unwrap();
         assert_eq!(extractions, 0, "extraction goes with the document");
+    }
+
+    /// Stand in for the OCR stage: a page with three recognised spans.
+    fn ocr(conn: &Connection, job_id: i64) -> (i64, Vec<i64>) {
+        let doc_id: i64 = conn
+            .query_row("SELECT doc_id FROM jobs WHERE job_id = ?1", [job_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO pages (doc_id, page_no, image_path, width, height)
+             VALUES (?1, 1, '/tmp/page1.png', 1200, 1600)",
+            [doc_id],
+        )
+        .unwrap();
+        let page_id = conn.last_insert_rowid();
+
+        let spans = [
+            ("Covenant — Abraham", 0.94, 0.10, 0.08),
+            ("promise repeated", 0.71, 0.15, 0.14),
+            ("see Galatians 3", 0.55, 0.60, 0.22),
+        ];
+        let mut ids = Vec::new();
+        for (idx, (text, confidence, x, y)) in spans.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO spans (doc_id, page_id, idx, text, confidence, x, y, w, h)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0.3, 0.04)",
+                rusqlite::params![doc_id, page_id, idx as i64, text, confidence, x, y],
+            )
+            .unwrap();
+            ids.push(conn.last_insert_rowid());
+        }
+        conn.execute(
+            "INSERT INTO extractions (job_id, text, engine, confidence)
+             VALUES (?1, ?2, 'vision/ocr', 0.55)",
+            rusqlite::params![job_id, "Covenant — Abraham\npromise repeated\nsee Galatians 3"],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE jobs SET state = 'NEEDS_REVIEW' WHERE job_id = ?1",
+            [job_id],
+        )
+        .unwrap();
+        (page_id, ids)
+    }
+
+    fn image_fixture() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        db::apply_schema(&conn).unwrap();
+        create_document(
+            &mut conn,
+            "page.jpg",
+            "/tmp/page.jpg",
+            "jpg",
+            1024,
+            "abc",
+            &DocumentMeta::default(),
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn a_scan_keeps_its_page_and_span_positions() {
+        let conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        ocr(&conn, job_id);
+
+        let detail = get_job(&conn, job_id).unwrap();
+        assert_eq!(detail.kind, "image");
+        assert_eq!(detail.pages.len(), 1);
+        assert_eq!(detail.pages[0].width, 1200);
+        assert_eq!(detail.spans.len(), 3);
+        // Spans come back in reading order, each with its box and confidence.
+        assert_eq!(detail.spans[0].text, "Covenant — Abraham");
+        assert_eq!(detail.spans[0].page_no, Some(1));
+        assert_eq!(detail.spans[2].x, Some(0.60));
+        assert!(detail.spans[2].confidence.unwrap() < 0.6);
+    }
+
+    #[test]
+    fn span_corrections_stay_in_place_and_rebuild_the_text() {
+        let mut conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        let (_, span_ids) = ocr(&conn, job_id);
+
+        let edits = vec![
+            SpanEdit { span_id: span_ids[0], text: "Covenant — Abraham".into() },
+            SpanEdit { span_id: span_ids[1], text: "promise repeated to Isaac".into() },
+            SpanEdit { span_id: span_ids[2], text: "see Galatians 3".into() },
+        ];
+        save_span_verification(&mut conn, job_id, &edits).unwrap();
+
+        let detail = get_job(&conn, job_id).unwrap();
+        assert_eq!(detail.job.state, "VERIFIED");
+        assert!(detail.job.verified);
+        // Only the changed span is marked edited; the others keep their history.
+        assert!(!detail.spans[0].edited);
+        assert!(detail.spans[1].edited);
+        assert_eq!(detail.spans[1].text, "promise repeated to Isaac");
+        // The note body is rebuilt from the spans, so it can't drift from them.
+        assert_eq!(
+            detail.text.as_deref(),
+            Some("Covenant — Abraham\npromise repeated to Isaac\nsee Galatians 3")
+        );
+    }
+
+    #[test]
+    fn an_emptied_span_is_kept_but_contributes_nothing() {
+        let mut conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        let (_, span_ids) = ocr(&conn, job_id);
+
+        // The engine read a stray mark as a word; the reviewer clears it.
+        let edits = vec![
+            SpanEdit { span_id: span_ids[0], text: "Covenant — Abraham".into() },
+            SpanEdit { span_id: span_ids[1], text: "".into() },
+            SpanEdit { span_id: span_ids[2], text: "see Galatians 3".into() },
+        ];
+        save_span_verification(&mut conn, job_id, &edits).unwrap();
+
+        let detail = get_job(&conn, job_id).unwrap();
+        assert_eq!(detail.spans.len(), 3, "the span stays, so the page still lines up");
+        assert_eq!(
+            detail.text.as_deref(),
+            Some("Covenant — Abraham\nsee Galatians 3")
+        );
+    }
+
+    #[test]
+    fn spans_from_another_document_are_refused() {
+        let mut conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        ocr(&conn, job_id);
+        create_document(
+            &mut conn,
+            "other.jpg",
+            "/tmp/other.jpg",
+            "jpg",
+            10,
+            "def",
+            &DocumentMeta::default(),
+        )
+        .unwrap();
+        let other_job = list_jobs(&conn).unwrap()[0].job_id;
+        let (_, other_spans) = ocr(&conn, other_job);
+
+        let edits = vec![SpanEdit { span_id: other_spans[0], text: "hijacked".into() }];
+        assert!(save_span_verification(&mut conn, job_id, &edits).is_err());
+    }
+
+    #[test]
+    fn clearing_every_span_is_not_a_verification() {
+        let mut conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        let (_, span_ids) = ocr(&conn, job_id);
+        let edits: Vec<SpanEdit> = span_ids
+            .iter()
+            .map(|id| SpanEdit { span_id: *id, text: "  ".into() })
+            .collect();
+        assert!(save_span_verification(&mut conn, job_id, &edits).is_err());
+        assert_eq!(get_job(&conn, job_id).unwrap().job.state, "NEEDS_REVIEW");
+    }
+
+    #[test]
+    fn deleting_a_job_keeps_the_page_its_note_was_read_from() {
+        let mut conn = image_fixture();
+        let job_id = list_jobs(&conn).unwrap()[0].job_id;
+        let (_, span_ids) = ocr(&conn, job_id);
+        let edits: Vec<SpanEdit> = span_ids
+            .iter()
+            .map(|id| SpanEdit { span_id: *id, text: "kept".into() })
+            .collect();
+        save_span_verification(&mut conn, job_id, &edits).unwrap();
+
+        let doc_id: i64 = conn
+            .query_row("SELECT doc_id FROM jobs WHERE job_id = ?1", [job_id], |r| r.get(0))
+            .unwrap();
+        let note_id =
+            db::create_note(&mut conn, None, Some("Scan".into()), "kept".into()).unwrap();
+        conn.execute(
+            "UPDATE notes SET doc_id = ?2 WHERE note_id = ?1",
+            rusqlite::params![note_id, doc_id],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE jobs SET state = 'DONE', note_id = ?2 WHERE job_id = ?1",
+            rusqlite::params![job_id, note_id],
+        )
+        .unwrap();
+
+        let orphaned = delete_job(&mut conn, job_id).unwrap();
+        assert!(orphaned.is_empty(), "nothing to delete: the note still needs the page");
+        let pages: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pages", [], |r| r.get(0))
+            .unwrap();
+        let spans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM spans", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!((pages, spans), (1, 3), "the page and its spans outlive the job");
     }
 
     /// The real thing: Rust queues a document, the actual Python worker

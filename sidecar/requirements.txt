@@ -6,3 +6,15 @@
 
 # Phase 3 — typed documents. (.txt/.md/.docx need nothing beyond the stdlib.)
 pypdf>=5.0
+
+# Phase 4 — handwriting and scans, read on-device by macOS Vision.
+# Also rasterises scanned PDFs so their pages can be OCR'd and reviewed.
+pyobjc-framework-Vision>=10.0 ; sys_platform == "darwin"
+pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"
+
+# Phase 4 — audio. Not installed by default: the models are large, and the
+# pipeline reports "engine not installed" rather than failing obscurely.
+#   sidecar/.venv/bin/pip install faster-whisper
+# Speaker labels additionally need pyannote.audio and a HUGGINGFACE_TOKEN,
+# with the licence accepted at hf.co/pyannote/speaker-diarization-3.1:
+#   sidecar/.venv/bin/pip install "pyannote.audio>=3.1"

@@ -247,16 +247,26 @@ fn retry_job(state: State<Db>, job_id: i64) -> Result<(), String> {
     ingest::retry_job(&conn, job_id)
 }
 
-/// Remove a job and its uploaded file. A note it already produced is kept.
+/// Remove a job. A note it already produced is kept, along with the page images
+/// that note was read off; only files nothing references are deleted.
 #[tauri::command]
 fn delete_job(state: State<Db>, job_id: i64) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let path = ingest::stored_path(&conn, job_id)?;
-    ingest::delete_job(&conn, job_id)?;
-    if let Some(path) = path {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    for path in ingest::delete_job(&mut conn, job_id)? {
         let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+/// Accept a scan or recording span by span, keeping each correction in place.
+#[tauri::command]
+fn verify_job_spans(
+    state: State<Db>,
+    job_id: i64,
+    spans: Vec<ingest::SpanEdit>,
+) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::save_span_verification(&mut conn, job_id, &spans)
 }
 
 #[tauri::command]
@@ -410,6 +420,7 @@ pub fn run() {
             list_jobs,
             get_job,
             verify_job,
+            verify_job_spans,
             retry_job,
             delete_job,
             worker_status
