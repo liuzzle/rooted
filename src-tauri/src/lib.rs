@@ -1,5 +1,7 @@
 mod db;
+mod ingest;
 mod packs;
+mod sidecar;
 
 use db::{
     Anchor, Book, ChapterAnnotations, Db, LibraryNote, Note, RecentHighlight, Stats, Translation,
@@ -7,7 +9,8 @@ use db::{
 };
 use packs::Pack;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 /// Key under which the reader's current translation is remembered.
 const ACTIVE_TRANSLATION: &str = "active_translation";
@@ -165,6 +168,109 @@ fn set_last_read(state: State<Db>, position: String) -> Result<(), String> {
     db::set_setting(&conn, LAST_READ, &position)
 }
 
+// --- ingestion -------------------------------------------------------------
+
+/// Where uploaded source files are kept, beside the database.
+fn documents_dir() -> Result<std::path::PathBuf, String> {
+    let dir = db::resolve_db_path()
+        .parent()
+        .ok_or("cannot resolve the app data directory")?
+        .join("documents");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+/// Store an uploaded typed document and queue it for extraction.
+#[tauri::command]
+fn upload_document(
+    state: State<Db>,
+    filename: String,
+    bytes: Vec<u8>,
+    meta: ingest::DocumentMeta,
+) -> Result<i64, String> {
+    let format = ingest::format_of(&filename)?;
+    if bytes.is_empty() {
+        return Err(format!("'{filename}' is empty"));
+    }
+
+    let digest = Sha256::digest(&bytes);
+    let sha256 = format!("{digest:x}");
+    // Content-addressed on disk: the same file uploaded twice can't collide,
+    // and a re-upload after an edit lands beside the original.
+    let stored = documents_dir()?.join(format!("{}-{}", &sha256[..12], sanitize(&filename)));
+    std::fs::write(&stored, &bytes).map_err(|e| e.to_string())?;
+
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::create_document(
+        &mut conn,
+        &filename,
+        &stored.to_string_lossy(),
+        &format,
+        bytes.len() as i64,
+        &sha256,
+        &meta,
+    )
+}
+
+/// Keep a recognisable filename without letting it escape the documents dir.
+fn sanitize(filename: &str) -> String {
+    filename
+        .chars()
+        .map(|c| if c.is_alphanumeric() || "._- ".contains(c) { c } else { '_' })
+        .collect::<String>()
+        .trim_matches(['.', ' '])
+        .to_string()
+}
+
+#[tauri::command]
+fn list_jobs(state: State<Db>) -> Result<Vec<ingest::Job>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::list_jobs(&conn)
+}
+
+#[tauri::command]
+fn get_job(state: State<Db>, job_id: i64) -> Result<ingest::JobDetail, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::get_job(&conn, job_id)
+}
+
+/// Accept extracted text, with any corrections. The worker turns it into a note.
+#[tauri::command]
+fn verify_job(state: State<Db>, job_id: i64, text: String) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::save_verification(&mut conn, job_id, &text)
+}
+
+#[tauri::command]
+fn retry_job(state: State<Db>, job_id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::retry_job(&conn, job_id)
+}
+
+/// Remove a job and its uploaded file. A note it already produced is kept.
+#[tauri::command]
+fn delete_job(state: State<Db>, job_id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let path = ingest::stored_path(&conn, job_id)?;
+    ingest::delete_job(&conn, job_id)?;
+    if let Some(path) = path {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn worker_status(
+    state: State<Db>,
+    sidecar: State<sidecar::Sidecar>,
+) -> Result<sidecar::WorkerStatus, String> {
+    let heartbeat = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        db::get_setting(&conn, "worker_heartbeat")?
+    };
+    Ok(sidecar.status(heartbeat))
+}
+
 // --- translation packs -----------------------------------------------------
 
 #[derive(Clone, Serialize)]
@@ -263,9 +369,20 @@ fn set_active_translation(state: State<Db>, abbrev: String) -> Result<(), String
 pub fn run() {
     let conn = db::open().expect("failed to open database");
 
+    // The ingestion worker runs alongside the app, sharing the database. If it
+    // can't start, uploads simply queue until one does — nothing is lost.
+    let worker = sidecar::Sidecar::new();
+    worker.start(&db::resolve_db_path());
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Db(std::sync::Mutex::new(conn)))
+        .manage(worker)
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                window.state::<sidecar::Sidecar>().stop();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_translations,
             list_books,
@@ -288,7 +405,14 @@ pub fn run() {
             list_recent_highlights,
             get_stats,
             get_last_read,
-            set_last_read
+            set_last_read,
+            upload_document,
+            list_jobs,
+            get_job,
+            verify_job,
+            retry_job,
+            delete_job,
+            worker_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
