@@ -33,12 +33,21 @@ pub fn open() -> Result<Connection, String> {
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/0001_init.sql"),
     include_str!("../migrations/0002_settings.sql"),
+    include_str!("../migrations/0003_ingestion.sql"),
 ];
 
 /// Enable foreign keys and apply the canonical schema (idempotent).
+///
+/// WAL matters from Phase 3 on: the Python ingestion worker holds its own
+/// connection to this same file, and the default rollback journal would have
+/// readers and the writer locking each other out.
 pub fn apply_schema(conn: &Connection) -> Result<(), String> {
-    conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| e.to_string())?;
+    conn.execute_batch(
+        "PRAGMA foreign_keys = ON;
+         PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;",
+    )
+    .map_err(|e| e.to_string())?;
     for migration in MIGRATIONS {
         conn.execute_batch(migration).map_err(|e| e.to_string())?;
     }
