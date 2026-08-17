@@ -9,7 +9,14 @@ See the full build plan in [`docs/PLAN.md`](./PLAN.md).
 
 - **Node** 20.19+ (or 22.12+) and npm
 - **Rust** stable (`rustup`) — Tauri backend
-- **Python** 3.10+ — Bible import (later: AI sidecar)
+- **Python** 3.10+ — Bible import and the ingestion worker
+
+```bash
+python3 -m venv sidecar/.venv
+sidecar/.venv/bin/python -m pip install -r sidecar/requirements.txt
+```
+
+The app finds `sidecar/.venv` automatically (override with `ROOTED_PYTHON`).
 
 ## First-time setup
 
@@ -117,10 +124,48 @@ the machine stages. Three properties hold the pipeline together:
   marked verified. Tests assert both halves.
 
 Formats: `.txt`/`.md` (decoded — a non-UTF-8 file drops confidence so a human
-looks), `.docx` (paragraph text via stdlib `zipfile` + XML, no dependency), and
-`.pdf` **text layer only** — that needs `pip install pypdf`, and a scanned PDF is
-reported as needing OCR rather than guessed at. Auto-verify for perfect
-extractions exists behind `--auto-verify` and is off by default.
+looks), `.docx` (paragraph text via stdlib `zipfile` + XML, no dependency),
+`.pdf` (text layer via `pypdf`; without one it falls through to OCR), images
+(`.jpg`/`.png`/`.heic`/`.tiff`), and audio (`.mp3`/`.m4a`/`.wav`/…).
+
+Engines live in `sidecar/engines.py` and all return the same shape — an
+`Extraction` of positioned `Span`s — so the worker, the review UI and the note
+model don't care which one ran. A missing engine is an actionable error on the
+job, never a silently empty result.
+
+## Scans and recordings (Phase 4)
+
+**A page is not a paragraph.** Handwritten notes carry meaning in their layout —
+arrows, margin notes, bullets nested by indentation, fragments. Flattening that
+into prose invents reading order and connections that were never written, and
+once flattened you can't tell what was read from what was inferred. So a scan is
+stored as **the page image plus spans with their positions on it** (`pages`,
+`spans`), and review draws each span over the scan and corrects it in place.
+Audio uses the same table with time instead of space: `start_s`/`end_s` and a
+speaker label instead of a box.
+
+**OCR is macOS Vision, on device.** Nothing leaves the machine, there's no model
+download, and it returns per-line boxes and confidence. Its weaknesses are worth
+knowing: it is fair on cursive, better on printing, and it **reports full
+confidence for readings that are plainly wrong** ("cf." → "of."). Two
+consequences are deliberate:
+
+- A scan or recording is **never** auto-verified, whatever `--auto-verify` says.
+- The review UI marks low-confidence spans but tells you a confident reading can
+  still be wrong — the marking is a hint about where to look, not a filter on
+  what needs reading.
+
+Vision does not reconstruct arrows or hierarchy, and nothing here tries to: that
+is interpretation, and it belongs to you during review, not to an engine.
+
+**Audio needs installing.** `faster-whisper` gives timestamped segments;
+speaker labels additionally need `pyannote.audio` plus a `HUGGINGFACE_TOKEN`
+with the licence accepted at hf.co/pyannote/speaker-diarization-3.1. Without
+them an audio job fails with exactly that message. Transcripts without
+diarization say so rather than guessing at speaker changes.
+
+Auto-verify for perfect *typed* extractions exists behind `--auto-verify` and is
+off by default.
 
 Worker overrides: `ROOTED_WORKER` (script path), `ROOTED_PYTHON` (interpreter).
 If neither resolves, the app still runs — uploads queue and the UI says the
