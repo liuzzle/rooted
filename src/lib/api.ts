@@ -317,8 +317,59 @@ export interface Job {
   preview: string | null;
 }
 
+/** A page of a scan, as shown in review. */
+export interface Page {
+  page_id: number;
+  page_no: number;
+  image_path: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * A recognised piece of text and where it came from: a box on the page for a
+ * scan (normalised 0..1 from the top-left), a stretch of time for a recording.
+ */
+export interface Span {
+  span_id: number;
+  page_id: number | null;
+  page_no: number | null;
+  idx: number;
+  text: string;
+  confidence: number | null;
+  x: number | null;
+  y: number | null;
+  w: number | null;
+  h: number | null;
+  start_s: number | null;
+  end_s: number | null;
+  speaker: string | null;
+  edited: boolean;
+}
+
 export interface JobDetail extends Job {
   text: string | null;
+  /** Which review UI this job needs. */
+  kind: "typed" | "image" | "audio";
+  pages: Page[];
+  spans: Span[];
+}
+
+/** Below this, the review UI marks a span as doubtful. */
+export const LOW_CONFIDENCE = 0.75;
+
+/** Accept a scan or recording span by span, keeping corrections in place. */
+export function verifyJobSpans(
+  jobId: number,
+  spans: { span_id: number; text: string }[],
+): Promise<void> {
+  return invoke("verify_job_spans", { jobId, spans });
+}
+
+/** Page image bytes, for drawing spans over. */
+export async function readPageImage(pageId: number): Promise<string> {
+  const bytes = await invoke<ArrayBuffer>("read_page_image", { pageId });
+  return URL.createObjectURL(new Blob([bytes]));
 }
 
 export interface WorkerStatus {
