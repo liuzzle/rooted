@@ -21,7 +21,8 @@ const STAGES: { state: JobState; label: string; hint: string }[] = [
   { state: "ERROR", label: "Failed", hint: "retry or remove" },
 ];
 
-const ACCEPT = ".txt,.md,.docx,.pdf";
+const ACCEPT =
+  ".txt,.md,.docx,.pdf,.jpg,.jpeg,.png,.heic,.tiff,.tif,.mp3,.m4a,.wav,.aiff,.flac";
 const POLL_MS = 1500;
 
 export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
@@ -101,8 +102,9 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
         <div>
           <h2>Ingest</h2>
           <p className="card-note">
-            Typed documents for now — text, Markdown, Word and PDFs with a text
-            layer. Handwriting and audio arrive in Phase 4.
+            Documents, scans and recordings. Scans are read on-device and come
+            back as text you check on the page it came from; a PDF without a
+            text layer is treated as a scan.
           </p>
         </div>
         <WorkerBadge status={worker} />
