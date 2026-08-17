@@ -57,8 +57,22 @@ impl Sidecar {
         in_repo.exists().then_some(in_repo)
     }
 
+    /// Which interpreter runs the worker: an explicit override, the sidecar's
+    /// own virtualenv (where its dependencies are installed), or whatever
+    /// `python3` is on PATH.
     fn python() -> String {
-        std::env::var("ROOTED_PYTHON").unwrap_or_else(|_| "python3".into())
+        if let Ok(python) = std::env::var("ROOTED_PYTHON") {
+            return python;
+        }
+        if let Some(script) = Sidecar::script_path() {
+            if let Some(dir) = script.parent() {
+                let venv = dir.join(".venv/bin/python3");
+                if venv.exists() {
+                    return venv.to_string_lossy().into_owned();
+                }
+            }
+        }
+        "python3".into()
     }
 
     pub fn start(&self, db_path: &std::path::Path) {

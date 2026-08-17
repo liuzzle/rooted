@@ -1,0 +1,8 @@
+# Ingestion worker dependencies.
+#
+# Install into the sidecar's own environment — the app finds it automatically:
+#   python3 -m venv sidecar/.venv
+#   sidecar/.venv/bin/python -m pip install -r sidecar/requirements.txt
+
+# Phase 3 — typed documents. (.txt/.md/.docx need nothing beyond the stdlib.)
+pypdf>=5.0
