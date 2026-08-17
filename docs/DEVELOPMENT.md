@@ -45,7 +45,12 @@ npm run build          # typecheck + build the frontend only
 cargo test --manifest-path src-tauri/Cargo.toml              # data-layer tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored # + network tests
 npm test               # frontend logic tests (vitest)
+python3 -m unittest discover -s sidecar   # ingestion worker tests
 ```
+
+The end-to-end ingestion test (Rust queues a job → the real Python worker
+processes it → a note appears) is in the `--ignored` set because it shells out
+to `python3`.
 
 The database path can be overridden for both the app and the import script via
 the `ROOTED_DB` environment variable, or the import script's `--db` flag.
@@ -87,6 +92,39 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 - Removing a pack deletes its verses and tokens but keeps its `translations`
   row, so notes written against it keep resolving and a reinstall lands on the
   same `translation_id`.
+
+## Ingestion (Phase 3)
+
+The app starts `sidecar/worker.py` as a child process and they share the
+database — no IPC. That's why the schema runs in **WAL** mode: two processes
+write to the same file.
+
+```
+UPLOADED → EXTRACTING → NEEDS_REVIEW → VERIFIED → DONE
+                 ↘ ERROR (retryable)
+```
+
+Rust owns what a person does (upload, review, verify, retry); the worker owns
+the machine stages. Three properties hold the pipeline together:
+
+- **Resumable.** Jobs are claimed with a lease (`claimed_by`/`claimed_at`). Kill
+  the app mid-extraction and the next worker reclaims the job once the lease
+  goes stale; after `MAX_ATTEMPTS` interrupted runs it stops instead of looping.
+- **Idempotent.** One `extractions` row per job, upserted, and publishing twice
+  updates the same note rather than making a second one.
+- **Nothing becomes a note unverified.** `save_verification` is the only route
+  to `VERIFIED`, and the worker refuses to publish a job whose extraction isn't
+  marked verified. Tests assert both halves.
+
+Formats: `.txt`/`.md` (decoded — a non-UTF-8 file drops confidence so a human
+looks), `.docx` (paragraph text via stdlib `zipfile` + XML, no dependency), and
+`.pdf` **text layer only** — that needs `pip install pypdf`, and a scanned PDF is
+reported as needing OCR rather than guessed at. Auto-verify for perfect
+extractions exists behind `--auto-verify` and is off by default.
+
+Worker overrides: `ROOTED_WORKER` (script path), `ROOTED_PYTHON` (interpreter).
+If neither resolves, the app still runs — uploads queue and the UI says the
+worker is down.
 
 ## Notes without a reference
 
