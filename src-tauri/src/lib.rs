@@ -269,6 +269,25 @@ fn verify_job_spans(
     ingest::save_span_verification(&mut conn, job_id, &spans)
 }
 
+/// The bytes of a page image, for the review UI to draw spans over.
+///
+/// Handed over as raw bytes rather than exposing the filesystem to the webview:
+/// only pages that are actually in the database can be read, and only by id.
+#[tauri::command]
+fn read_page_image(state: State<Db>, page_id: i64) -> Result<tauri::ipc::Response, String> {
+    let path: String = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT image_path FROM pages WHERE page_id = ?1",
+            rusqlite::params![page_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| format!("page {page_id} not found"))?
+    };
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 #[tauri::command]
 fn worker_status(
     state: State<Db>,
@@ -421,6 +440,7 @@ pub fn run() {
             get_job,
             verify_job,
             verify_job_spans,
+            read_page_image,
             retry_job,
             delete_job,
             worker_status
