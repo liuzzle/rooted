@@ -10,7 +10,7 @@
 //! says the worker is down. Nothing is lost; the queue drains when a worker
 //! appears.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
@@ -28,6 +28,30 @@ pub struct WorkerStatus {
     /// Last time any worker reported in (UTC, from the shared database).
     pub last_heartbeat: Option<String>,
     pub problem: Option<String>,
+    /// What that worker can actually read. Empty until a worker has reported.
+    pub engines: Vec<EngineStatus>,
+}
+
+/// One reading engine, as the worker found it on this machine.
+///
+/// The worker decides all of this — including what to do about an engine that
+/// isn't installed — and writes it to the shared database. Repeating those
+/// rules here would mean two places to change when an engine moves.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EngineStatus {
+    pub key: String,
+    pub label: String,
+    pub available: bool,
+    pub engine: String,
+    pub note: String,
+}
+
+/// Parse what the worker reported. A malformed or absent value is simply "we
+/// don't know yet" — never an error the user has to see.
+pub fn parse_engines(reported: Option<String>) -> Vec<EngineStatus> {
+    reported
+        .and_then(|json| serde_json::from_str(&json).ok())
+        .unwrap_or_default()
 }
 
 impl Sidecar {
@@ -114,7 +138,11 @@ impl Sidecar {
         *self.problem.lock().unwrap() = problem;
     }
 
-    pub fn status(&self, last_heartbeat: Option<String>) -> WorkerStatus {
+    pub fn status(
+        &self,
+        last_heartbeat: Option<String>,
+        engines: Vec<EngineStatus>,
+    ) -> WorkerStatus {
         // `try_wait` reaps the process if it exited, so "running" stays honest.
         let mut guard = self.child.lock().unwrap();
         let running = match guard.as_mut() {
@@ -133,6 +161,36 @@ impl Sidecar {
             running,
             last_heartbeat,
             problem: self.problem.lock().unwrap().clone(),
+            engines,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the worker actually writes to `settings.worker_engines`.
+    const REPORTED: &str = r#"[
+        {"key":"asr","label":"Recordings","available":false,
+         "engine":"faster-whisper","note":"pip install faster-whisper"}
+    ]"#;
+
+    #[test]
+    fn engine_report_round_trips() {
+        let engines = parse_engines(Some(REPORTED.into()));
+        assert_eq!(engines.len(), 1);
+        assert_eq!(engines[0].key, "asr");
+        assert!(!engines[0].available);
+        assert!(engines[0].note.contains("faster-whisper"));
+    }
+
+    #[test]
+    fn an_unreported_or_broken_report_is_not_an_error() {
+        // No worker has run yet, or an older one wrote something else. Either
+        // way the app shows no engine list rather than failing to load.
+        assert!(parse_engines(None).is_empty());
+        assert!(parse_engines(Some("not json".into())).is_empty());
+        assert!(parse_engines(Some("{}".into())).is_empty());
     }
 }

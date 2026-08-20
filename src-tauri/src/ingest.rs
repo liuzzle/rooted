@@ -534,6 +534,45 @@ pub fn save_span_verification(
 }
 
 /// Push a failed job back to the front of the queue.
+/// Ask for this scan's lines to be re-read off the machine.
+///
+/// Separate from `retry_job` on purpose. Retrying is free and local; this sends
+/// cropped lines to a third party, so it is its own explicit action, recorded
+/// on the job, and the worker clears the flag the moment it acts on it. A retry
+/// afterwards re-reads on this machine only.
+pub fn escalate_job(conn: &Connection, job_id: i64) -> Result<(), String> {
+    let state = current_state(conn, job_id)?;
+    if !matches!(state, JobState::Error | JobState::NeedsReview) {
+        return Err(format!("job {job_id} is {state}; nothing to re-read"));
+    }
+    // Only a page has lines to crop. Asking whether pages were stored is the
+    // exact question — a scanned PDF has them and a typed one doesn't, which
+    // the file extension alone can't tell you.
+    let pages: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pages p JOIN jobs j ON j.doc_id = p.doc_id
+              WHERE j.job_id = ?1",
+            [job_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if pages == 0 {
+        return Err(
+            "this was read as text on this machine; there are no page images to send"
+                .into(),
+        );
+    }
+    conn.execute(
+        "UPDATE jobs
+            SET escalate = 1, state = ?2, last_error = NULL,
+                claimed_by = NULL, claimed_at = NULL, updated_at = datetime('now')
+          WHERE job_id = ?1",
+        rusqlite::params![job_id, JobState::Uploaded.as_str()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub fn retry_job(conn: &Connection, job_id: i64) -> Result<(), String> {
     let state = current_state(conn, job_id)?;
     if !matches!(state, JobState::Error | JobState::NeedsReview) {
@@ -632,6 +671,16 @@ pub fn job_counts(conn: &Connection) -> Result<Vec<(String, i64)>, String> {
 mod tests {
     use super::*;
     use crate::db;
+
+    /// Stand in for the worker having read a scan: a page and one span.
+    fn add_page(conn: &Connection, doc_id: i64) {
+        conn.execute(
+            "INSERT INTO pages (doc_id, page_no, image_path, width, height)
+             VALUES (?1, 1, '/tmp/page.png', 1000, 1400)",
+            [doc_id],
+        )
+        .unwrap();
+    }
 
     fn fixture() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -1095,5 +1144,84 @@ mod tests {
             assert_eq!(JobState::parse(state.as_str()).unwrap(), state);
         }
         assert!(JobState::parse("SOMETHING_ELSE").is_err());
+    }
+
+    #[test]
+    fn escalation_is_only_offered_for_a_page() {
+        let conn = fixture();
+        let job_id: i64 = conn
+            .query_row("SELECT job_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        extract(&conn, job_id, "already text", 1.0);
+
+        // A typed document was never read by an engine that could be wrong
+        // about it, so there is nothing to send.
+        let refused = escalate_job(&conn, job_id).unwrap_err();
+        assert!(refused.contains("no page images"), "{refused}");
+        assert_eq!(escalate_flag(&conn, job_id), 0);
+    }
+
+    #[test]
+    fn escalating_queues_the_job_and_records_the_decision() {
+        let conn = fixture();
+        let job_id: i64 = conn
+            .query_row("SELECT job_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        let doc_id: i64 = conn
+            .query_row("SELECT doc_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        extract(&conn, job_id, "sm dscrnble", 0.4);
+        add_page(&conn, doc_id);
+
+        escalate_job(&conn, job_id).unwrap();
+
+        assert_eq!(current_state(&conn, job_id).unwrap(), JobState::Uploaded);
+        assert_eq!(escalate_flag(&conn, job_id), 1);
+    }
+
+    #[test]
+    fn a_finished_job_is_not_sent_anywhere() {
+        let conn = fixture();
+        let job_id: i64 = conn
+            .query_row("SELECT job_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        let doc_id: i64 = conn
+            .query_row("SELECT doc_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        add_page(&conn, doc_id);
+        conn.execute("UPDATE jobs SET state = 'DONE' WHERE job_id = ?1", [job_id])
+            .unwrap();
+
+        assert!(escalate_job(&conn, job_id).is_err());
+        assert_eq!(escalate_flag(&conn, job_id), 0);
+    }
+
+    /// A plain retry re-reads on this machine; it never repeats a send.
+    #[test]
+    fn retrying_does_not_re_escalate() {
+        let conn = fixture();
+        let job_id: i64 = conn
+            .query_row("SELECT job_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        let doc_id: i64 = conn
+            .query_row("SELECT doc_id FROM jobs", [], |r| r.get(0))
+            .unwrap();
+        extract(&conn, job_id, "sm dscrnble", 0.4);
+        add_page(&conn, doc_id);
+        escalate_job(&conn, job_id).unwrap();
+        // The worker acted on it and cleared the flag.
+        conn.execute("UPDATE jobs SET escalate = 0, state = 'NEEDS_REVIEW' WHERE job_id = ?1", [job_id])
+            .unwrap();
+
+        retry_job(&conn, job_id).unwrap();
+
+        assert_eq!(escalate_flag(&conn, job_id), 0);
+    }
+
+    fn escalate_flag(conn: &Connection, job_id: i64) -> i64 {
+        conn.query_row("SELECT escalate FROM jobs WHERE job_id = ?1", [job_id], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 }

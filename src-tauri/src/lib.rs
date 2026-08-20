@@ -241,6 +241,13 @@ fn verify_job(state: State<Db>, job_id: i64, text: String) -> Result<(), String>
     ingest::save_verification(&mut conn, job_id, &text)
 }
 
+/// The one action that sends anything off this machine. The UI asks first.
+#[tauri::command]
+fn escalate_job(state: State<Db>, job_id: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::escalate_job(&conn, job_id)
+}
+
 #[tauri::command]
 fn retry_job(state: State<Db>, job_id: i64) -> Result<(), String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -293,11 +300,14 @@ fn worker_status(
     state: State<Db>,
     sidecar: State<sidecar::Sidecar>,
 ) -> Result<sidecar::WorkerStatus, String> {
-    let heartbeat = {
+    let (heartbeat, engines) = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
-        db::get_setting(&conn, "worker_heartbeat")?
+        (
+            db::get_setting(&conn, "worker_heartbeat")?,
+            db::get_setting(&conn, "worker_engines")?,
+        )
     };
-    Ok(sidecar.status(heartbeat))
+    Ok(sidecar.status(heartbeat, sidecar::parse_engines(engines)))
 }
 
 // --- translation packs -----------------------------------------------------
@@ -442,6 +452,7 @@ pub fn run() {
             verify_job_spans,
             read_page_image,
             retry_job,
+            escalate_job,
             delete_job,
             worker_status
         ])
