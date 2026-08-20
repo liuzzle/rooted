@@ -835,6 +835,50 @@ body {
   border-color: #e4cfa6;
 }
 
+/* The one action that leaves the machine: made to look like a decision. */
+.escalate-confirm {
+  margin: 0.5rem 0 1rem;
+  max-width: 40rem;
+  border-color: #e4cfa6;
+  background: #fdf8ee;
+}
+.escalate-confirm h3 {
+  margin-top: 0;
+}
+
+/* What this machine can read — shown before anything is uploaded. */
+.engines {
+  margin: 0.25rem 0 0.5rem;
+}
+.engine-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.engine {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.engine.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.engine.off {
+  color: #8a5a1f;
+  border-color: #e4cfa6;
+  background: #fbf1dc;
+}
+.engine-missing {
+  margin: 0.4rem 0 0;
+}
+
 .upload {
   margin: 0.75rem 0 1rem;
   max-width: 52rem;

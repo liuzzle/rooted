@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  EngineStatus,
   JobDetail,
   LOW_CONFIDENCE,
   getJob,
@@ -22,10 +23,13 @@ export default function ReviewPanel({
   jobId,
   onDone,
   onCancel,
+  diarization,
 }: {
   jobId: number;
   onDone: () => void;
   onCancel: () => void;
+  /** Passed through so a transcript can explain missing speaker labels. */
+  diarization?: EngineStatus;
 }) {
   const [job, setJob] = useState<JobDetail | null>(null);
   const [text, setText] = useState("");
@@ -158,7 +162,12 @@ export default function ReviewPanel({
         />
       )}
       {job.kind === "audio" && (
-        <TranscriptReview spans={job.spans} edits={edits} onEdit={editSpan} />
+        <TranscriptReview
+          spans={job.spans}
+          edits={edits}
+          onEdit={editSpan}
+          diarization={diarization}
+        />
       )}
 
       {error && <p className="notes-error">{error}</p>}
