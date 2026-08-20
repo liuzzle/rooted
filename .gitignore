@@ -12,11 +12,16 @@ dist
 dist-ssr
 *.local
 
+# Local settings and secrets — `.env.example` documents the keys.
+.env
+
 # Local dev data / caches
 data
 *.db
 __pycache__
 .venv
+myenv
+myenv/*
 
 # Editor directories and files
 .vscode/*

@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -36,8 +37,10 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import engines
 from engines import (
     EngineUnavailable,
+    escalate_extraction,
     Extraction,
     ExtractionError,
     confidence_of_decode,
@@ -65,6 +68,99 @@ MAX_ATTEMPTS = 3
 DEFAULT_LEASE = 120
 # Poll interval when following the queue.
 DEFAULT_INTERVAL = 2.0
+
+# ---------------------------------------------------------------------------
+# Local settings
+# ---------------------------------------------------------------------------
+
+# Settings that must be the same for the app and the worker are deliberately
+# not read from a file: if the two processes disagreed about which database
+# they share, uploads would vanish into a second one. Those stay real
+# environment variables, set before the app starts.
+ENV_FILE_REFUSES = {"ROOTED_DB", "ROOTED_WORKER", "ROOTED_PYTHON"}
+
+
+def parse_env_file(text: str) -> list[tuple[str, str]]:
+    """`KEY=value` lines, as a person would write them.
+
+    Blank lines and `#` comments are skipped, a leading `export` is tolerated,
+    and one layer of matching quotes is stripped. Deliberately not a shell: no
+    interpolation, no command substitution, nothing that makes the file able to
+    do more than name a value.
+    """
+    pairs: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            pairs.append((key, value))
+    return pairs
+
+
+def load_env_file(path: Path) -> list[str]:
+    """Apply one `.env` file. Returns the keys it set.
+
+    A real environment variable always wins: the file is a convenience for
+    things a GUI app can't inherit from your shell, not an override of what you
+    explicitly exported.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"[worker] could not read {path}: {exc}", file=sys.stderr, flush=True)
+        return []
+
+    applied = []
+    for key, value in parse_env_file(text):
+        if key in ENV_FILE_REFUSES:
+            print(
+                f"[worker] ignoring {key} in {path}: it has to match what the app"
+                " uses, so set it as an environment variable instead",
+                file=sys.stderr,
+                flush=True,
+            )
+            continue
+        if key in os.environ:
+            continue
+        os.environ[key] = value
+        applied.append(key)
+    return applied
+
+
+def load_local_env(db_path: Optional[Path] = None) -> list[Path]:
+    """Read `.env` from, in order: `ROOTED_ENV`, the repo, and beside the
+    database.
+
+    The last one is the point: a packaged app launched from the Finder gets
+    launchd's environment, not your shell's, so a token exported in `.zshrc` is
+    invisible to it. A file next to `rooted.db` is somewhere both a development
+    checkout and an installed app can find.
+    """
+    candidates = []
+    if os.environ.get("ROOTED_ENV"):
+        candidates.append(Path(os.environ["ROOTED_ENV"]).expanduser())
+    candidates.append(REPO_ROOT / ".env")
+    candidates.append((db_path or default_db_path()).parent / ".env")
+
+    loaded, seen = [], set()
+    for path in candidates:
+        resolved = path.resolve() if path.exists() else path
+        if resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        if load_env_file(path):
+            loaded.append(path)
+    return loaded
+
 
 # ---------------------------------------------------------------------------
 # Database
@@ -136,13 +232,31 @@ def kind_of(fmt: str) -> str:
     return "typed"
 
 
-def read_document(path: Path, fmt: str, pages_dir: Path) -> Extraction:
+def read_document(
+    path: Path, fmt: str, pages_dir: Path, escalate: bool = False
+) -> Extraction:
     """Dispatch a document to the engine that can read it.
 
     A PDF is tried as a typed document first and falls back to OCR: a scan
     saved as PDF is the common case, and the two are indistinguishable by
     extension.
+
+    `escalate` re-reads a scan's lines off the machine afterwards. On-device
+    OCR still runs first and still supplies the boxes — escalation is a second
+    reading of the same lines, never a different way of finding them.
     """
+    extraction = _read_document(path, fmt, pages_dir)
+    if escalate:
+        if not extraction.pages:
+            raise ExtractionError(
+                f"a {fmt} file is read on this machine; there is nothing to "
+                "send to the cloud"
+            )
+        extraction = escalate_extraction(extraction)
+    return extraction
+
+
+def _read_document(path: Path, fmt: str, pages_dir: Path) -> Extraction:
     if fmt in ("txt", "md"):
         return extract_plain_text(path)
     if fmt == "docx":
@@ -180,6 +294,7 @@ class Worker:
         # default: the human-in-the-loop state is the point of the pipeline.
         self.auto_verify = auto_verify
         self.id = worker_id or f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
+        self._engines: Optional[str] = None
 
     # -- state helpers ------------------------------------------------------
 
@@ -199,6 +314,24 @@ class Worker:
             "INSERT INTO settings (key, value) VALUES ('worker_heartbeat', datetime('now'))"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
             " updated_at = datetime('now')"
+        )
+        self.publish_engines()
+
+    def publish_engines(self) -> None:
+        """Report what this machine can read, so the app can say so *before* a
+        file is uploaded rather than failing the job afterwards.
+
+        Computed once per process: availability changes when someone installs a
+        package, and the worker restarts with the app. Probing it every tick
+        would import torch on every pass.
+        """
+        if self._engines is None:
+            self._engines = json.dumps(engines.describe())
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('worker_engines', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = datetime('now')",
+            (self._engines,),
         )
 
     def reclaim_stale(self) -> int:
@@ -260,10 +393,20 @@ class Worker:
         """UPLOADED → NEEDS_REVIEW: get the text out of the file, verbatim."""
         job_id = job["job_id"]
         path = Path(job["stored_path"])
+        # Cleared whatever happens next. Sending a page off the machine is a
+        # decision made once, per job; a retry afterwards must not repeat it
+        # silently.
+        escalating = bool(job["escalate"])
+        if escalating:
+            self.conn.execute(
+                "UPDATE jobs SET escalate = 0 WHERE job_id = ?", (job_id,)
+            )
         try:
             if not path.exists():
                 raise ExtractionError(f"the uploaded file is missing: {path}")
-            extraction = read_document(path, job["format"], self.pages_dir(job))
+            extraction = read_document(
+                path, job["format"], self.pages_dir(job), escalate=escalating
+            )
             extraction.confidence = min(
                 extraction.confidence, confidence_of_decode(extraction.text)
             )
@@ -451,6 +594,9 @@ def main() -> int:
 
     db_path = Path(args.db) if args.db else default_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
+    for path in load_local_env(db_path):
+        # Names only — a token belongs in the file, not in the log.
+        print(f"[worker] read settings from {path}", flush=True)
     conn = connect(db_path)
     apply_migrations(conn)
 

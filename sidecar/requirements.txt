@@ -12,9 +12,17 @@ pypdf>=5.0
 pyobjc-framework-Vision>=10.0 ; sys_platform == "darwin"
 pyobjc-framework-Quartz>=10.0 ; sys_platform == "darwin"
 
-# Phase 4 — audio. Not installed by default: the models are large, and the
-# pipeline reports "engine not installed" rather than failing obscurely.
-#   sidecar/.venv/bin/pip install faster-whisper
-# Speaker labels additionally need pyannote.audio and a HUGGINGFACE_TOKEN,
-# with the licence accepted at hf.co/pyannote/speaker-diarization-3.1:
+# Phase 4 — audio. Timestamped transcription, on device.
+faster-whisper>=1.1
+
+# Speaker labels are opt-in: pyannote pulls in torch, and needs a
+# HUGGINGFACE_TOKEN whose account has accepted the conditions on all three of
+# pyannote/speaker-diarization-3.1, pyannote/segmentation-3.0 and
+# pyannote/speaker-diarization-community-1 (see .env.example). Without it a
+# transcript simply doesn't say who was talking.
 #   sidecar/.venv/bin/pip install "pyannote.audio>=3.1"
+
+# Phase 4 — cloud second opinion on a scan the local OCR can't read. Opt-in:
+# without it (and an ANTHROPIC_API_KEY) the option isn't offered at all, and
+# nothing can leave the machine.
+#   sidecar/.venv/bin/pip install anthropic
