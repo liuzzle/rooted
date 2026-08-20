@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  EngineStatus,
   Job,
   JobState,
   WorkerStatus,
   deleteJob,
+  escalateJob,
   getWorkerStatus,
   listJobs,
   retryJob,
@@ -29,6 +31,7 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [reviewing, setReviewing] = useState<number | null>(null);
+  const [escalating, setEscalating] = useState<Job | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -79,6 +82,9 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
     }
   }
 
+  const cloud = worker?.engines.find((e) => e.key === "cloud");
+  const cloudReady = cloud?.available ?? false;
+
   const counts = new Map<JobState, number>();
   for (const job of jobs) counts.set(job.state, (counts.get(job.state) ?? 0) + 1);
   const needingReview = jobs.filter((j) => j.state === "NEEDS_REVIEW");
@@ -87,6 +93,7 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
     return (
       <ReviewPanel
         jobId={reviewing}
+        diarization={worker?.engines.find((e) => e.key === "diarization")}
         onDone={() => {
           setReviewing(null);
           refresh();
@@ -111,6 +118,22 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
       </header>
 
       {error && <p className="notes-error">{error}</p>}
+
+      {escalating && (
+        <EscalateConfirm
+          job={escalating}
+          onCancel={() => setEscalating(null)}
+          onConfirm={() => {
+            const job = escalating;
+            setEscalating(null);
+            escalateJob(job.job_id)
+              .then(refresh)
+              .catch((e) => setError(String(e)));
+          }}
+        />
+      )}
+
+      <EngineList engines={worker?.engines ?? []} />
 
       <section className="card upload">
         <h3>Add documents</h3>
@@ -237,6 +260,11 @@ export default function Ingest({ onOpenNotes }: { onOpenNotes: () => void }) {
                   read the file again
                 </button>
               )}
+              {cloudReady && (job.state === "ERROR" || job.state === "NEEDS_REVIEW") && (
+                <button className="link-btn" onClick={() => setEscalating(job)}>
+                  read it in the cloud
+                </button>
+              )}
               <button
                 className="link-btn"
                 onClick={() =>
@@ -276,6 +304,79 @@ function WorkerBadge({ status }: { status: WorkerStatus | null }) {
     <span className="worker-badge down" title={status.problem ?? undefined}>
       Worker not running — uploads will queue
     </span>
+  );
+}
+
+/**
+ * The one place the app asks before doing something it can't undo.
+ *
+ * Everything else in Rooted happens on this machine. This doesn't, so it says
+ * exactly what travels — cropped lines from this page, nothing else — and what
+ * comes back is still machine text that has to be read in review. No "don't
+ * ask again": it is a per-page decision, and that's the point.
+ */
+function EscalateConfirm({
+  job,
+  onConfirm,
+  onCancel,
+}: {
+  job: Job;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <section className="card escalate-confirm">
+      <h3>Send this page to be read?</h3>
+      <p className="card-note">
+        The lines this machine found on <strong>{job.title ?? job.filename}</strong>{" "}
+        will be cropped and sent to Anthropic to be read again. The note, its
+        date and speaker, and every other document stay here.
+      </p>
+      <p className="card-note">
+        What comes back is another machine reading — you still check it in
+        review before it becomes a note.
+      </p>
+      <div className="note-actions">
+        <button className="primary" onClick={onConfirm}>
+          Send the lines
+        </button>
+        <button className="link-btn" onClick={onCancel}>
+          keep it on this machine
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * What this machine can read, before anything is uploaded.
+ *
+ * An engine that isn't installed is a fact about the machine, not a failure of
+ * the file — so it belongs here rather than on a job that has already failed.
+ * The worker supplies the text, including how to install what's missing.
+ */
+function EngineList({ engines }: { engines: EngineStatus[] }) {
+  if (engines.length === 0) return null;
+  const missing = engines.filter((e) => !e.available);
+  return (
+    <section className="engines">
+      <ul className="engine-row">
+        {engines.map((engine) => (
+          <li
+            key={engine.key}
+            className={`engine ${engine.available ? "on" : "off"}`}
+            title={`${engine.engine} — ${engine.note}`}
+          >
+            {engine.label}
+          </li>
+        ))}
+      </ul>
+      {missing.map((engine) => (
+        <p key={engine.key} className="card-note engine-missing">
+          <strong>{engine.label}</strong> unavailable — {engine.note}
+        </p>
+      ))}
+    </section>
   );
 }
 

@@ -376,6 +376,22 @@ export interface WorkerStatus {
   running: boolean;
   last_heartbeat: string | null;
   problem: string | null;
+  /** What the worker can read on this machine. Empty until it has reported. */
+  engines: EngineStatus[];
+}
+
+/**
+ * One reading engine, as the worker found it.
+ *
+ * `note` comes from the worker — including what to do about a missing one — so
+ * the UI never hard-codes an install instruction that could drift.
+ */
+export interface EngineStatus {
+  key: string;
+  label: string;
+  available: boolean;
+  engine: string;
+  note: string;
 }
 
 export function uploadDocument(
@@ -406,6 +422,14 @@ export function verifyJob(jobId: number, text: string): Promise<void> {
 
 export function retryJob(jobId: number): Promise<void> {
   return invoke("retry_job", { jobId });
+}
+
+/**
+ * Re-read a scan's lines off this machine. The only call in the app that sends
+ * anything anywhere, so it is never made without asking first.
+ */
+export function escalateJob(jobId: number): Promise<void> {
+  return invoke("escalate_job", { jobId });
 }
 
 export function deleteJob(jobId: number): Promise<void> {

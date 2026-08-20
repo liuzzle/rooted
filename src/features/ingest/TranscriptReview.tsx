@@ -1,4 +1,4 @@
-import { LOW_CONFIDENCE, Span } from "../../lib/api";
+import { EngineStatus, LOW_CONFIDENCE, Span } from "../../lib/api";
 
 /**
  * Reviewing a transcript.
@@ -10,16 +10,19 @@ import { LOW_CONFIDENCE, Span } from "../../lib/api";
  *
  * Speaker labels only appear when diarization actually ran. Without it the
  * transcript simply doesn't say who spoke, which is better than guessing at
- * speaker changes.
+ * speaker changes — and it says why, since "not installed" and "installed but
+ * heard one voice" mean different things to the person reading.
  */
 export default function TranscriptReview({
   spans,
   edits,
   onEdit,
+  diarization,
 }: {
   spans: Span[];
   edits: Map<number, string>;
   onEdit: (spanId: number, text: string) => void;
+  diarization?: EngineStatus;
 }) {
   const speakers = Array.from(
     new Set(spans.map((s) => s.speaker).filter(Boolean) as string[]),
@@ -32,10 +35,15 @@ export default function TranscriptReview({
           {speakers.length} speaker{speakers.length > 1 ? "s" : ""} detected:{" "}
           {speakers.join(", ")}
         </p>
+      ) : diarization && !diarization.available ? (
+        <p className="card-note">
+          No speaker labels — {diarization.note}. The transcript is still
+          correct; it just doesn't say who was talking.
+        </p>
       ) : (
         <p className="card-note">
-          No speaker labels — diarization isn't installed, so the transcript
-          doesn't say who was talking.
+          No speaker labels on this recording — nothing was labelled rather than
+          guessing at speaker changes.
         </p>
       )}
 
