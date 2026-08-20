@@ -18,6 +18,19 @@ sidecar/.venv/bin/python -m pip install -r sidecar/requirements.txt
 
 The app finds `sidecar/.venv` automatically (override with `ROOTED_PYTHON`).
 
+Optional local settings — currently a Hugging Face token for speaker labels and
+the Whisper model size — live in a gitignored `.env`:
+
+```bash
+cp .env.example .env
+```
+
+The worker reads it at startup from `$ROOTED_ENV`, then the repo, then beside
+`rooted.db` in the app data directory — that last one so an installed app,
+which gets launchd's environment rather than your shell's, can still find a
+token. Anything already exported wins; the file never overrides it. See
+`.env.example` for the keys, including the three it deliberately refuses.
+
 ## First-time setup
 
 ```bash
@@ -53,11 +66,14 @@ cargo test --manifest-path src-tauri/Cargo.toml              # data-layer tests
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored # + network tests
 npm test               # frontend logic tests (vitest)
 python3 -m unittest discover -s sidecar   # ingestion worker tests
+ROOTED_TEST_ASR=1 python3 -m unittest discover -s sidecar   # + real transcription
 ```
 
 The end-to-end ingestion test (Rust queues a job → the real Python worker
 processes it → a note appears) is in the `--ignored` set because it shells out
-to `python3`.
+to `python3`. The transcription test is behind `ROOTED_TEST_ASR` for the same
+reason in reverse: its first run downloads a Whisper model. OCR tests skip
+themselves when the Vision bindings aren't installed.
 
 The database path can be overridden for both the app and the import script via
 the `ROOTED_DB` environment variable, or the import script's `--db` flag.
@@ -67,11 +83,14 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 | Path | Purpose |
 |------|---------|
 | `src/App.tsx` | Shell: Read · Notes · Dashboard views, active translation, pack modal. |
-| `src/features/` | `reader/` (reading pane), `notes/` (note panel + chapter rail), `library/` (all notes), `dashboard/`, `translations/` (pack manager). |
+| `src/features/` | `reader/` (reading pane), `notes/` (note panel + chapter rail), `library/` (all notes), `dashboard/`, `translations/` (pack manager), `ingest/` (upload, pipeline status, review). |
 | `src/lib/api.ts` | Typed Tauri commands. `src/lib/reference.ts` — scripture reference parsing. |
 | `src-tauri/src/db.rs` | SQLite access + query commands (with unit tests). |
 | `src-tauri/src/packs.rs` | Pack registry, download, tokenizer, import. |
 | `src-tauri/src/lib.rs` | Tauri command registration + app setup. |
+| `src-tauri/src/ingest.rs` | Jobs, documents, pages, spans, verification. |
+| `src-tauri/src/sidecar.rs` | Worker process lifecycle + what it reports it can read. |
+| `sidecar/worker.py` | Job state machine. `sidecar/engines.py` — the reading engines. |
 | `src-tauri/migrations/` | Schema, applied in filename order on every start (each migration is idempotent). |
 | `src-tauri/packs/registry.json` | Downloadable translations. |
 | `scripts/import_bible.py` | Command-line equivalent of the in-app pack import. |
@@ -158,11 +177,72 @@ consequences are deliberate:
 Vision does not reconstruct arrows or hierarchy, and nothing here tries to: that
 is interpretation, and it belongs to you during review, not to an engine.
 
-**Audio needs installing.** `faster-whisper` gives timestamped segments;
-speaker labels additionally need `pyannote.audio` plus a `HUGGINGFACE_TOKEN`
-with the licence accepted at hf.co/pyannote/speaker-diarization-3.1. Without
-them an audio job fails with exactly that message. Transcripts without
-diarization say so rather than guessing at speaker changes.
+**Audio is transcribed on device too.** `faster-whisper` turns a recording
+into timestamped segments — each one a span with its own start, end and
+confidence — so a doubtful stretch can be found in the audio and checked rather
+than trusted. The model is chosen with `ROOTED_WHISPER_MODEL` (default `base`)
+and is downloaded on first use.
+
+**Speaker labels are opt-in.** They need `pyannote.audio` installed *and* a
+`HUGGINGFACE_TOKEN` whose account has accepted the conditions for **three**
+repos: `pyannote/speaker-diarization-3.1`, `pyannote/segmentation-3.0`, and
+`pyannote/speaker-diarization-community-1`. The third isn't listed in 3.1's
+config — pyannote 4 rebuilt the pipeline around PLDA clustering and loads those
+weights from community-1 whichever checkpoint you name, so accepting only what
+the config mentions gets you a 403 on a file you never asked for. Pick a
+different pipeline with `ROOTED_DIARIZATION_MODEL`.
+
+Three things about `pyannote.audio` 4.0 that the adapter absorbs, so neither
+version needs pinning:
+
+- `from_pretrained` renamed `use_auth_token` to `token`; the adapter uses
+  whichever the installed signature takes.
+- It decodes audio through **torchcodec**, which `dlopen`s FFmpeg's shared
+  libraries and searches only the interpreter's own rpath — a working Homebrew
+  ffmpeg is invisible to it, and speaker labels die on a missing `libavutil`.
+  So the file is decoded here instead, with the PyAV that ships with
+  faster-whisper (already how the transcript was read), and pyannote is handed
+  a waveform at 16 kHz mono. The native dependency drops out entirely.
+- It returns a `DiarizeOutput` holding two annotations rather than one
+  `Annotation`. The adapter prefers its **exclusive** one, which drops
+  overlapping speech: each transcript segment gets a single label, so an
+  interjection can't relabel the sentence it lands in.
+
+Without all of that, the transcript says it doesn't know who was talking rather
+than guessing at speaker changes — and it says so *without failing the job*.
+Speaker labels are an addition to a transcript that already stands on its own;
+losing an hour of correct transcription to an unaccepted licence would be the
+wrong trade, so the reason goes to the worker log and the transcript proceeds.
+
+**A page this machine can't read can be re-read in the cloud.** It is the only
+path by which anything here leaves the computer, and it is deliberately narrow:
+
+- **You ask, per page.** An explicit action on one job, which the app confirms
+  by naming what travels. There is no setting that turns it on for everything,
+  and no "don't ask again".
+- **Only cropped lines travel.** Vision has already found the lines and their
+  boxes; escalation sends those crops, so what comes back can be put straight
+  back on the box it came from. The note, its date and speaker, and every other
+  document stay here. `crop_spans` is tested by re-reading each crop on-device
+  and checking it says what its span says.
+- **Every line is re-read, not just doubtful ones** — Vision reports full
+  confidence for plain misreadings, so confidence can't be used as a filter.
+- **The answer is checked before it is believed.** Indices must be exactly the
+  ones sent — no extras, duplicates or omissions — or the job errors rather
+  than risk a reading landing on the wrong line. A line the cloud can't read
+  either keeps the on-device text and is marked doubtful.
+- **The decision is used once.** The worker clears `jobs.escalate` the moment it
+  acts on it, so a later retry re-reads on this machine only.
+
+Needs `pip install anthropic` and `ANTHROPIC_API_KEY`; without both, the action
+isn't offered. Nothing about this is auto-verified: a cloud reading is still
+machine text and goes through review like any other.
+
+**The app says what it can read before you upload.** Each tick the worker
+writes `engines.describe()` to `settings.worker_engines`, and the Ingest view
+lists them — a missing engine appears there, with the command that installs it,
+instead of as a failed job afterwards. The worker probes once per process, so
+installing something takes effect when the app restarts.
 
 Auto-verify for perfect *typed* extractions exists behind `--auto-verify` and is
 off by default.
