@@ -1,4 +1,5 @@
 mod db;
+mod graph;
 mod ingest;
 mod packs;
 mod sidecar;
@@ -310,6 +311,56 @@ fn worker_status(
     Ok(sidecar.status(heartbeat, sidecar::parse_engines(engines)))
 }
 
+// --- topics ----------------------------------------------------------------
+
+/// Topics, most-reached first. Every one is backed by mentions in real notes.
+#[tauri::command]
+fn list_concepts(
+    state: State<Db>,
+    query: Option<String>,
+    limit: i64,
+) -> Result<Vec<graph::ConceptSummary>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::list_concepts(&conn, query, limit)
+}
+
+/// A topic page: the label and every passage that mentions it, verbatim.
+#[tauri::command]
+fn get_concept(state: State<Db>, concept_id: i64) -> Result<graph::ConceptPage, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::get_concept(&conn, concept_id)
+}
+
+#[tauri::command]
+fn concepts_for_note(
+    state: State<Db>,
+    note_id: i64,
+) -> Result<Vec<graph::ConceptSummary>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::concepts_for_note(&conn, note_id)
+}
+
+/// Scripture references written inside a note, positioned in its body.
+#[tauri::command]
+fn note_references(
+    state: State<Db>,
+    note_id: i64,
+) -> Result<Vec<graph::NoteReference>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::references_for_note(&conn, note_id)
+}
+
+/// One verse, for previewing a reference without leaving the note.
+#[tauri::command]
+fn get_verse_text(
+    state: State<Db>,
+    translation_id: i64,
+    verse_id: String,
+) -> Result<Option<String>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::verse_text(&conn, translation_id, &verse_id)
+}
+
 // --- translation packs -----------------------------------------------------
 
 #[derive(Clone, Serialize)]
@@ -453,6 +504,11 @@ pub fn run() {
             read_page_image,
             retry_job,
             escalate_job,
+            list_concepts,
+            get_concept,
+            concepts_for_note,
+            note_references,
+            get_verse_text,
             delete_job,
             worker_status
         ])
