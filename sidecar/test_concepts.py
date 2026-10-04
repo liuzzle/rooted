@@ -9,13 +9,18 @@ make sure that check can't be bypassed by accident.
 from __future__ import annotations
 
 import hashlib
+import os
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-import concepts
-import worker as w
+# Hermetic: no test reaches a real model server, whatever is running on this
+# machine. A closed port refuses at once. Export the variable to opt back in.
+os.environ.setdefault("ROOTED_OLLAMA_HOST", "http://127.0.0.1:9")
+
+import concepts  # noqa: E402
+import worker as w  # noqa: E402
 
 NOTE = """Covenant with Abraham is where this begins. The promise is repeated
 to Isaac, and again to Jacob.

@@ -18,8 +18,12 @@ import unittest
 import zipfile
 from pathlib import Path
 
-import engines
-import worker as w
+# Hermetic: no test reaches a real model server, whatever is running on this
+# machine. A closed port refuses at once. Export the variable to opt back in.
+os.environ.setdefault("ROOTED_OLLAMA_HOST", "http://127.0.0.1:9")
+
+import engines  # noqa: E402
+import worker as w  # noqa: E402
 
 
 def _vision_available() -> bool:

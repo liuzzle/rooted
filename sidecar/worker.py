@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -39,6 +40,7 @@ from pathlib import Path
 from typing import Optional
 
 import concepts
+import embeddings
 import engines
 import references
 from engines import (
@@ -298,6 +300,12 @@ class Worker:
         self.auto_verify = auto_verify
         self.id = worker_id or f"{os.getpid()}-{uuid.uuid4().hex[:6]}"
         self._engines: Optional[str] = None
+        # When the embedding model was last looked for, and whether it was
+        # there. Asked at most once a minute: Ollama may be started after the
+        # app, and polling it every tick would be noise in its log.
+        self._embed_checked = 0.0
+        self._embed_ready = False
+        self._verses_idle_until = 0.0
 
     # -- state helpers ------------------------------------------------------
 
@@ -732,6 +740,127 @@ class Worker:
              ref.chapter, ref.verse, ref.verse_end, ref.verse_id),
         )
 
+    # -- vectors ------------------------------------------------------------
+
+    EMBED_RECHECK = 60.0
+
+    @contextlib.contextmanager
+    def transaction(self):
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def embedding_ready(self) -> bool:
+        now = time.monotonic()
+        if now - self._embed_checked >= self.EMBED_RECHECK:
+            self._embed_checked = now
+            self._embed_ready = embeddings.model_available()
+            self.publish_embedding()
+        return self._embed_ready
+
+    def publish_embedding(self) -> None:
+        """Tell the app which model the vectors come from, and where it runs.
+
+        The app embeds the query itself, and a query embedded by any other model
+        would be compared against vectors it can't be compared with. Saying it
+        here keeps one place that decides — this worker and its `.env`.
+        """
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('embedding', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value,"
+            " updated_at = datetime('now')",
+            (json.dumps({
+                "model": embeddings.EMBED_MODEL,
+                "host": embeddings.OLLAMA_HOST,
+                "available": self._embed_ready,
+            }),),
+        )
+
+    def embed_pending(self, budget: float = 3.0) -> int:
+        """Give unread passages a vector, notes first, for a few seconds.
+
+        Notes come first because they are what a person searches for and there
+        are few of them; a translation is thirty thousand verses and fills in
+        behind, the one being read before the others. Bounded by time rather
+        than count so a slow machine still returns to the job queue promptly.
+        """
+        if not self.embedding_ready():
+            return 0
+        model = embeddings.EMBED_MODEL
+        deadline = time.monotonic() + budget
+        done = 0
+        try:
+            while time.monotonic() < deadline:
+                rows = self.conn.execute(
+                    """SELECT chunk_id, text FROM chunks
+                        WHERE embedded_by IS NULL OR embedded_by <> ?
+                        ORDER BY chunk_id LIMIT ?""",
+                    (model, embeddings.BATCH),
+                ).fetchall()
+                if not rows:
+                    break
+                vectors = embeddings.embed([r["text"] for r in rows], model)
+                with self.transaction():
+                    # A chunk replaced meanwhile is simply gone; ids are never
+                    # reused, so this can't land on the new text.
+                    self.conn.executemany(
+                        "UPDATE chunks SET embedding = ?, embedded_by = ?"
+                        " WHERE chunk_id = ?",
+                        [(embeddings.pack(v), model, r["chunk_id"])
+                         for r, v in zip(rows, vectors)],
+                    )
+                done += len(rows)
+
+            # Once every verse has a vector, finding that out again is a scan
+            # of the whole Bible; do it once a minute, not every tick.
+            verses_due = time.monotonic() >= self._verses_idle_until
+            while verses_due and time.monotonic() < deadline:
+                rows = self.conn.execute(
+                    """SELECT v.translation_id, v.verse_id, v.text
+                         FROM verses v
+                         JOIN translations t ON t.id = v.translation_id
+                         LEFT JOIN verse_vectors vv
+                           ON vv.translation_id = v.translation_id
+                          AND vv.verse_id = v.verse_id
+                          AND vv.model = ?
+                        WHERE vv.verse_id IS NULL
+                        ORDER BY t.abbrev = (SELECT value FROM settings
+                                              WHERE key = 'active_translation') DESC,
+                                 v.translation_id, v.canonical_order
+                        LIMIT ?""",
+                    (model, embeddings.BATCH),
+                ).fetchall()
+                if not rows:
+                    self._verses_idle_until = time.monotonic() + self.EMBED_RECHECK
+                    break
+                vectors = embeddings.embed([r["text"] for r in rows], model)
+                with self.transaction():
+                    # REPLACE, so a vector from a previous model is overwritten
+                    # rather than left to be compared against the wrong query.
+                    self.conn.executemany(
+                        """INSERT OR REPLACE INTO verse_vectors
+                             (translation_id, verse_id, model, vector)
+                           SELECT ?, ?, ?, ?
+                            WHERE EXISTS (SELECT 1 FROM verses
+                                           WHERE translation_id = ? AND verse_id = ?)""",
+                        [(r["translation_id"], r["verse_id"], model,
+                          embeddings.pack(v), r["translation_id"], r["verse_id"])
+                         for r, v in zip(rows, vectors)],
+                    )
+                done += len(rows)
+        except embeddings.EmbeddingUnavailable as exc:
+            # The server went away mid-run. Search by words is unaffected;
+            # look again on the next check rather than every tick.
+            print(f"[worker] embedding paused: {exc}", file=sys.stderr, flush=True)
+            self._embed_ready = False
+            self._embed_checked = time.monotonic()
+            self.publish_embedding()
+        return done
+
     # -- loop ---------------------------------------------------------------
 
     def tick(self) -> int:
@@ -757,6 +886,9 @@ class Worker:
         # job or were typed in the app. A few per tick: this is background work
         # and must never make the app wait.
         advanced += self.index_notes()
+        # Vectors last: they're the only step that can take seconds, and
+        # everything above is something a person is waiting to see.
+        self.embed_pending()
 
         self.heartbeat()
         return advanced
