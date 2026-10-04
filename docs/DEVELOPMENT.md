@@ -251,6 +251,88 @@ Worker overrides: `ROOTED_WORKER` (script path), `ROOTED_PYTHON` (interpreter).
 If neither resolves, the app still runs — uploads queue and the UI says the
 worker is down.
 
+## Topics (Phase 5)
+
+The worker reads every note for topics — one typed in the app as much as one
+that arrived as a scan, since a graph covering only ingested notes would be a
+lie about the corpus. It works from `notes`, so nothing needs to be re-run when
+a note is written by hand.
+
+**The notes are German, and that changes the rules.** German capitalises every
+noun, so "capitalised mid-sentence" identifies a noun, not a name — and nearly
+every sentence has several. German also declines: "Herr" and "Herrn" are one
+word. So:
+
+- **Keys are lemma-then-stem.** Neither alone works. Snowball misses
+  "Herr"/"Herrn" (it protects short stems, and hand-stripping the -n wrongly
+  merges "Stein" into "Stei"); lemmatising misses "Glaube"/"Glauben", because
+  "Glauben" is itself a dictionary word. Composed, both pairs merge while
+  "Herr" and "Herz" stay apart. `simplemma` + `snowballstemmer`, both pure
+  Python; without them keys fall back to casefolding, which merges nothing.
+- **Mentions are found the same way.** A topic recorded as "Herr" has to find
+  "Herrn" in the text, or the graph understates what the note says. Matching is
+  by word sequence on the normalised form — so "grace" is still not found
+  inside "disgrace", and "God's grace" still does not match "the grace of God".
+- **Stopwords are checked by lemma**, so one entry ("sein") covers the whole
+  paradigm ("seine", "seinen", "seinem").
+- **Recurrence carries the weight in German.** A capitalised word needs to
+  appear at least twice; in English a name mid-sentence counts once. Either way
+  a word only ever capitalised at the start of a sentence proves nothing, which
+  is what stops "Later the law came. Later still…" from making a topic.
+- **Language is detected per note** by function-word overlap, and stored on the
+  source, because which rules were applied is part of knowing what the result
+  means.
+
+`sources.scheme` records the rules a note was read under, so improving the
+extractor re-reads notes that were already indexed instead of leaving them on
+the old rules forever.
+
+**Scripture references are found, stored, and clickable.** `references.py`
+resolves German and English forms — "Joh 3,16", "1. Mose 12,1-3", "Röm 4,3",
+"John 3:16" — with spacing and umlaut variants generated rather than listed, so
+"Roemer" and "1 Kor" resolve too. They are stored in `verse_links` with offsets,
+like everything else here, and the note body is *split* at those offsets rather
+than rewritten: hover previews the verse in the translation you're reading,
+click opens it. A citation is also excluded from topic extraction — "Vergleiche
+Joh 3,16" should not make a topic out of a gospel abbreviation.
+
+**Extraction is span-selection, not generation.** An extractor proposes a
+string; `concepts.gate` finds it verbatim in the note or rejects it. That's why
+extractors return *strings and never offsets*: a model asked for character
+positions produces plausible ones, so the positions are computed here instead
+and cannot be wrong about where a word is. The stored surface is sliced out of
+the note, so a concept's citation always shows what was actually written — if a
+model reports "God's grace" for a note reading "the grace of God", nothing is
+stored. `test_a_paraphrase_is_rejected` is that promise in executable form.
+
+Two extractors, both gated the same way — "this one is trustworthy" is the kind
+of exception that stops being true quietly:
+
+- **`phrases`** always runs, needs nothing installed. Capitalised runs that
+  aren't merely sentence openings (a name earns its capital by appearing
+  mid-sentence somewhere), plus words the note keeps returning to.
+- **`ollama/<model>`** runs when a local model server answers on
+  `ROOTED_OLLAMA_HOST`. It only ever *adds* topics: the deterministic pass
+  proposes first, so the model can't rename an existing one, and its labels
+  come back spelled as the note spells them.
+
+Topics are proposed from the **whole note** and then located **per paragraph**.
+Counting repetition inside a paragraph would miss exactly the notes that are
+most clearly about something — a note returning to "covenant" in three separate
+paragraphs is more about covenant than one that says it three times in a row.
+
+**A mention cites a range of a chunk of a source.** Editing a note moves those
+offsets, so a changed note is re-read and its chunks replaced outright; the
+cascade takes the old mentions with them. `sources.text_hash` is what decides
+"changed" — a mention pointing into text that no longer exists is the one
+failure this ledger must not have.
+
+`concepts.key` collapses case and whitespace so one word isn't two topics. It
+is **not** a synonym test: merging "grace" with "unmerited favour" needs
+embeddings and a person to confirm, and that pass isn't built yet. Likewise
+`concept_mentions.verified` and the `embedding` columns exist unused, because
+the merge and verse-suggestion passes will need somewhere to say so.
+
 ## Notes without a reference
 
 A note may have **no anchor at all** — a general study note. `notes` and
