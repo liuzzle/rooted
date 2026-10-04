@@ -567,3 +567,98 @@ export function getVerseText(
 ): Promise<string | null> {
   return invoke("get_verse_text", { translationId, verseId });
 }
+
+// --- search -----------------------------------------------------------------
+
+/** How a passage was found. Every hit names at least one. */
+export type FoundBy = "words" | "topic" | "cited" | "meaning";
+
+/**
+ * A passage of a note. `snippet` is stored text, quoted whole; `marks` are
+ * `[start, end)` character offsets into it.
+ */
+export interface NoteHit {
+  note_id: number;
+  note_title: string | null;
+  date: string | null;
+  speaker: string | null;
+  chunk_start: number;
+  snippet: string;
+  marks: [number, number][];
+  matched_by: FoundBy[];
+  score: number;
+}
+
+/** A verse in the translation searched. */
+export interface VerseHit {
+  verse_id: string;
+  book_osis: string;
+  book_name: string;
+  chapter: number;
+  verse: number;
+  snippet: string;
+  marks: [number, number][];
+  matched_by: FoundBy[];
+  cited_by: number;
+  score: number;
+}
+
+/** Whether search by meaning took part, and how much of the text it has read. */
+export interface Meaning {
+  used: boolean;
+  model: string | null;
+  detail: string;
+  notes_read: number;
+  notes_total: number;
+  verses_read: number;
+  verses_total: number;
+}
+
+export interface SearchResults {
+  query: string;
+  notes: NoteHit[];
+  bible: VerseHit[];
+  meaning: Meaning;
+}
+
+export function search(query: string, translationId: number): Promise<SearchResults> {
+  return invoke("search", { query, translationId });
+}
+
+// --- topic graph ------------------------------------------------------------
+
+export interface GraphNode {
+  concept_id: number;
+  label: string;
+  notes: number;
+}
+
+/** Two topics mentioned in the same passage, in `passages` passages. */
+export interface GraphEdge {
+  a: number;
+  b: number;
+  passages: number;
+}
+
+export interface ConceptGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+export function conceptGraph(limit = 150): Promise<ConceptGraph> {
+  return invoke("concept_graph", { limit });
+}
+
+/** A passage behind an edge, with both topics' mentions marked. */
+export interface SharedPassage {
+  note_id: number;
+  note_title: string | null;
+  date: string | null;
+  speaker: string | null;
+  snippet: string;
+  marks: [number, number][];
+}
+
+export function sharedPassages(a: number, b: number): Promise<SharedPassage[]> {
+  return invoke("shared_passages", { a, b });
+}

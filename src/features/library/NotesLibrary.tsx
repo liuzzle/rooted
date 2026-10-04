@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Anchor,
   Book,
@@ -14,6 +14,7 @@ import {
   wordAnchor,
 } from "../../lib/api";
 import NoteBody from "../notes/NoteBody";
+import type { NoteFocus } from "../../App";
 import { formatReference, parseReference } from "../../lib/reference";
 
 /**
@@ -27,10 +28,13 @@ import { formatReference, parseReference } from "../../lib/reference";
 export default function NotesLibrary({
   translationId,
   books,
+  focus,
   onJump,
 }: {
   translationId: number;
   books: Book[];
+  /** A note to bring into view — from search or a topic page. */
+  focus?: NoteFocus | null;
   onJump: (bookOsis: string, chapter: number, selection: Anchor | null) => void;
 }) {
   const [notes, setNotes] = useState<LibraryNote[]>([]);
@@ -39,6 +43,29 @@ export default function NotesLibrary({
   const [composing, setComposing] = useState(false);
   const [editing, setEditing] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [focused, setFocused] = useState<number | null>(null);
+  const pendingFocus = useRef<NoteFocus | null>(null);
+
+  // Arriving to see one note: clear the filters, or they may hide it.
+  useEffect(() => {
+    if (!focus) return;
+    pendingFocus.current = focus;
+    setBookFilter("");
+    setSearch("");
+  }, [focus]);
+
+  // Once the list holds it, scroll there and mark it for a moment.
+  useEffect(() => {
+    const want = pendingFocus.current;
+    if (!want || !notes.some((n) => n.note_id === want.noteId)) return;
+    pendingFocus.current = null;
+    setFocused(want.noteId);
+    document
+      .getElementById(`note-${want.noteId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    const id = setTimeout(() => setFocused(null), 2400);
+    return () => clearTimeout(id);
+  }, [notes]);
 
   const refresh = useCallback(() => {
     listAllNotes(translationId, bookFilter || null, search.trim() || null)
@@ -123,7 +150,11 @@ export default function NotesLibrary({
 
       <ul className="library-list">
         {notes.map((n) => (
-          <li key={n.note_id} className="library-note">
+          <li
+            key={n.note_id}
+            id={`note-${n.note_id}`}
+            className={focused === n.note_id ? "library-note focused" : "library-note"}
+          >
             <div className="library-note-head">
               {n.anchor ? (
                 <button className="ref-chip" onClick={() => open(n)}>

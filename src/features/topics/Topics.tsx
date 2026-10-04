@@ -6,6 +6,7 @@ import {
   getConcept,
   listConcepts,
 } from "../../lib/api";
+import TopicGraph from "./TopicGraph";
 
 /**
  * Topics.
@@ -29,6 +30,7 @@ export default function Topics({
   const [open, setOpen] = useState<ConceptPage | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<"list" | "graph">("list");
 
   const refresh = useCallback(() => {
     listConcepts(filter.trim() || null, 200)
@@ -42,8 +44,8 @@ export default function Topics({
 
   useEffect(refresh, [refresh]);
 
-  function openTopic(concept: ConceptSummary) {
-    getConcept(concept.concept_id)
+  function openTopic(conceptId: number) {
+    getConcept(conceptId)
       .then(setOpen)
       .catch((e) => setError(String(e)));
   }
@@ -68,17 +70,39 @@ export default function Topics({
             says it — open one to read the passages themselves.
           </p>
         </div>
-        <input
-          className="topics-filter"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter topics"
-        />
+        <div className="topics-controls">
+          <div className="segmented">
+            <button
+              className={mode === "list" ? "active" : ""}
+              onClick={() => setMode("list")}
+            >
+              List
+            </button>
+            <button
+              className={mode === "graph" ? "active" : ""}
+              onClick={() => setMode("graph")}
+            >
+              Graph
+            </button>
+          </div>
+          {mode === "list" && (
+            <input
+              className="topics-filter"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter topics"
+            />
+          )}
+        </div>
       </header>
+
+      {mode === "graph" && (
+        <TopicGraph onOpenTopic={openTopic} onOpenNote={onOpenNote} />
+      )}
 
       {error && <p className="notes-error">{error}</p>}
 
-      {!loading && concepts.length === 0 && (
+      {mode === "list" && !loading && concepts.length === 0 && (
         <p className="empty">
           {filter.trim()
             ? `No topic matches “${filter.trim()}”.`
@@ -86,18 +110,20 @@ export default function Topics({
         </p>
       )}
 
-      <ul className="topic-list">
-        {concepts.map((concept) => (
-          <li key={concept.concept_id}>
-            <button className="topic-chip" onClick={() => openTopic(concept)}>
-              <span className="topic-label">{concept.label}</span>
-              <span className="topic-count">
-                {concept.notes} note{concept.notes === 1 ? "" : "s"}
-              </span>
-            </button>
-          </li>
-        ))}
-      </ul>
+      {mode === "list" && (
+        <ul className="topic-list">
+          {concepts.map((concept) => (
+            <li key={concept.concept_id}>
+              <button className="topic-chip" onClick={() => openTopic(concept.concept_id)}>
+                <span className="topic-label">{concept.label}</span>
+                <span className="topic-count">
+                  {concept.notes} note{concept.notes === 1 ? "" : "s"}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

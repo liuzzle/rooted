@@ -13,10 +13,11 @@ import NotesLibrary from "./features/library/NotesLibrary";
 import Dashboard from "./features/dashboard/Dashboard";
 import Ingest from "./features/ingest/Ingest";
 import Topics from "./features/topics/Topics";
+import Search from "./features/search/Search";
 import TranslationsPanel from "./features/translations/TranslationsPanel";
 import "./App.css";
 
-type View = "read" | "notes" | "topics" | "dashboard" | "ingest";
+type View = "read" | "search" | "notes" | "topics" | "dashboard" | "ingest";
 
 /** Where the reader should go when another view sends you somewhere. */
 export interface ReadingTarget {
@@ -27,12 +28,19 @@ export interface ReadingTarget {
   nonce: number;
 }
 
+/** A note another view wants shown in the library. */
+export interface NoteFocus {
+  noteId: number;
+  nonce: number;
+}
+
 export default function App() {
   const [view, setView] = useState<View>("read");
   const [translations, setTranslations] = useState<Translation[]>([]);
   const [translationId, setTranslationId] = useState<number | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
   const [target, setTarget] = useState<ReadingTarget | null>(null);
+  const [focus, setFocus] = useState<NoteFocus | null>(null);
   const [showPacks, setShowPacks] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -85,6 +93,12 @@ export default function App() {
     [],
   );
 
+  /** Show one note in the library. */
+  const openNote = useCallback((noteId: number) => {
+    setFocus({ noteId, nonce: Date.now() });
+    setView("notes");
+  }, []);
+
   const activeTranslation =
     translations.find((t) => t.id === translationId) ?? null;
 
@@ -96,6 +110,7 @@ export default function App() {
           {(
             [
               ["read", "Read"],
+              ["search", "Search"],
               ["notes", "Notes"],
               ["topics", "Topics"],
               ["dashboard", "Dashboard"],
@@ -154,10 +169,19 @@ export default function App() {
               onError={setError}
             />
           )}
+          {view === "search" && (
+            <Search
+              translationId={translationId}
+              translationAbbrev={activeTranslation?.abbrev ?? null}
+              onOpenNote={openNote}
+              onJump={jumpTo}
+            />
+          )}
           {view === "notes" && (
             <NotesLibrary
               translationId={translationId}
               books={books}
+              focus={focus}
               onJump={jumpTo}
             />
           )}
@@ -169,7 +193,7 @@ export default function App() {
             />
           )}
           {view === "topics" && (
-            <Topics onOpenNote={() => setView("notes")} />
+            <Topics onOpenNote={openNote} />
           )}
           {view === "ingest" && <Ingest onOpenNotes={() => setView("notes")} />}
         </>
