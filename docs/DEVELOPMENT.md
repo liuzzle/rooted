@@ -330,10 +330,58 @@ cascade takes the old mentions with them. `sources.text_hash` is what decides
 failure this ledger must not have.
 
 `concepts.key` collapses case and whitespace so one word isn't two topics. It
-is **not** a synonym test: merging "grace" with "unmerited favour" needs
-embeddings and a person to confirm, and that pass isn't built yet. Likewise
-`concept_mentions.verified` and the `embedding` columns exist unused, because
-the merge and verse-suggestion passes will need somewhere to say so.
+is **not** a synonym test. Synonyms are a person's decision, below.
+
+**Phrases are words with only spaces between them.** A comma, `&`, `/`, a
+bullet or a bracket separates two things rather than joining one, and a line
+break ends a phrase, because these notes are written as indented lists. Before
+this rule, list lines came out as fused "topics" ("Jahren Ausharren Bewahren
+Hoffen", "Christus König Sohn"). A word containing a digit ("V10") is a marker,
+not a subject. Each of these cases is a test built from a real note.
+
+**References carry on.** "Hebräer 10,5-10 + 14", "Apg 2,22-32 + 13,35" and
+"Röm 4,3; 5,1" each produce every verse they name, each continuation with its
+own span. A reference's numbers never cross a line break, so a list line
+ending in "18,20" doesn't swallow the next line's "- 5. Mose". In a numbered
+list, "2. Johannes 14,15" is item 2, John 14: 2 John has one chapter, so when
+the ordinal reading names a chapter the book doesn't have, the number is read
+as a list marker.
+
+### Merging topics, suggesting verses
+
+The machine only ever **offers** these two things; a person decides.
+
+**Possibly the same topic.** Topic labels get vectors too, and pairs whose
+labels are at least 0.70 apart in cosine are listed above the topic list. Each
+side shows a passage that says it, with three choices: keep one, keep the
+other, or "not the same", which is remembered in `concept_distinct`. A merge
+moves every mention to the survivor (each still pointing at the words written)
+and records the merged spelling in `concept_aliases`, so the worker files that
+spelling under the survivor whenever the note is read again. Undo deletes the
+alias and marks the affected notes for re-reading, so the spelling comes back
+as its own topic from the text, without guessing which mentions were whose.
+
+Similarity on a bare label is weak, and the floor was set on the real topics.
+It catches variants ("Herr" / "Herr Jesus" 0.80, "Opfer" / "Opfergabe" 0.78)
+but not paraphrase: "Gnade" / "unverdiente Gunst" scores 0.49, *below*
+"Abraham" / "Isaak". Between 0.62 and 0.70 the pairs were mostly a shared word
+("Gott" / "Willen Gottes"). So every topic page also has **Merge another topic
+into this one…**, for what similarity can't see.
+
+**Verses close in meaning.** On request, never on load, each note can be
+compared with every verse of the open translation. At most five verses are
+offered, at most two per passage (one passage close to everything shouldn't
+crowd out the one with the right verse), and never one the note already
+cites. Each offer shows the passage it was matched to, because that is the
+honest reason it's there: good verses and poor ones score alike (V5 →
+Psalm 16:5 at 0.61; a list of dates → Nehemiah 10:39 at 0.63). **Link** records
+it in `verse_suggestions`, keyed by the canonical verse id so it holds in every
+translation, and a linked verse then counts as `cited` in search. **Not
+related** makes sure it isn't offered again. Either decision can be taken back.
+
+These scans are why `[profile.dev.package.rooted]` builds at `opt-level = 1`:
+unoptimised, suggesting verses for one note took 4 s in `tauri dev`; now it
+takes 0.3 s.
 
 ## Search (Phase 6)
 
