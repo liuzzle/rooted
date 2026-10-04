@@ -62,6 +62,36 @@
       "year": "1899",
       "versification": "kjv",
       "blurb": "English translation of the Latin Vulgate."
+    },
+    {
+      "abbrev": "SCH51",
+      "name": "Schlachter (1951)",
+      "slug": "schlachter",
+      "language": "de",
+      "license": "Public Domain",
+      "year": "1951",
+      "versification": "kjv",
+      "blurb": "Wortgetreue deutsche Übersetzung. Gemeinfrei."
+    },
+    {
+      "abbrev": "ELB71",
+      "name": "Elberfelder (1871)",
+      "slug": "elberfelder",
+      "language": "de",
+      "license": "Public Domain",
+      "year": "1871",
+      "versification": "kjv",
+      "blurb": "Sehr wörtlich, nah am Grundtext. Gemeinfrei."
+    },
+    {
+      "abbrev": "LUT1545",
+      "name": "Luther (1545)",
+      "slug": "luther1545",
+      "language": "de",
+      "license": "Public Domain",
+      "year": "1545",
+      "versification": "kjv",
+      "blurb": "Luthers Bibel in der Fassung letzter Hand. Frühneuhochdeutsch."
     }
   ]
 }
