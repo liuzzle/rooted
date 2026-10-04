@@ -12,10 +12,11 @@ import Reader from "./features/reader/Reader";
 import NotesLibrary from "./features/library/NotesLibrary";
 import Dashboard from "./features/dashboard/Dashboard";
 import Ingest from "./features/ingest/Ingest";
+import Topics from "./features/topics/Topics";
 import TranslationsPanel from "./features/translations/TranslationsPanel";
 import "./App.css";
 
-type View = "read" | "notes" | "dashboard" | "ingest";
+type View = "read" | "notes" | "topics" | "dashboard" | "ingest";
 
 /** Where the reader should go when another view sends you somewhere. */
 export interface ReadingTarget {
@@ -96,6 +97,7 @@ export default function App() {
             [
               ["read", "Read"],
               ["notes", "Notes"],
+              ["topics", "Topics"],
               ["dashboard", "Dashboard"],
               ["ingest", "Ingest"],
             ] as [View, string][]
@@ -165,6 +167,9 @@ export default function App() {
               books={books}
               onJump={jumpTo}
             />
+          )}
+          {view === "topics" && (
+            <Topics onOpenNote={() => setView("notes")} />
           )}
           {view === "ingest" && <Ingest onOpenNotes={() => setView("notes")} />}
         </>

@@ -491,3 +491,79 @@ export function onPackProgress(
 ): Promise<UnlistenFn> {
   return listen<PackProgress>("pack-progress", (e) => handler(e.payload));
 }
+
+// --- topics ----------------------------------------------------------------
+
+/** A topic in a list. Counts come from real mentions, never from a label. */
+export interface ConceptSummary {
+  concept_id: number;
+  label: string;
+  mentions: number;
+  notes: number;
+}
+
+/**
+ * One passage that mentions a topic.
+ *
+ * `snippet` is the note's own text; `char_start`/`char_end` index into it, so
+ * the term can be marked without the passage being edited.
+ */
+export interface Citation {
+  note_id: number;
+  note_title: string | null;
+  date: string | null;
+  speaker: string | null;
+  snippet: string;
+  char_start: number;
+  char_end: number;
+  surface: string;
+  extracted_by: string;
+}
+
+export interface ConceptPage {
+  concept_id: number;
+  label: string;
+  mentions: number;
+  notes: number;
+  citations: Citation[];
+}
+
+export function listConcepts(
+  query: string | null,
+  limit = 200,
+): Promise<ConceptSummary[]> {
+  return invoke("list_concepts", { query, limit });
+}
+
+export function getConcept(conceptId: number): Promise<ConceptPage> {
+  return invoke("get_concept", { conceptId });
+}
+
+/** The topics one note mentions — backlinks from the note's side. */
+export function conceptsForNote(noteId: number): Promise<ConceptSummary[]> {
+  return invoke("concepts_for_note", { noteId });
+}
+
+/** A scripture reference found inside a note, positioned in its body. */
+export interface NoteReference {
+  char_start: number;
+  char_end: number;
+  surface: string;
+  book_osis: string;
+  chapter: number;
+  verse: number | null;
+  verse_end: number | null;
+  verse_id: string | null;
+}
+
+export function noteReferences(noteId: number): Promise<NoteReference[]> {
+  return invoke("note_references", { noteId });
+}
+
+/** One verse, for previewing a reference. Null when this pack lacks it. */
+export function getVerseText(
+  translationId: number,
+  verseId: string,
+): Promise<string | null> {
+  return invoke("get_verse_text", { translationId, verseId });
+}

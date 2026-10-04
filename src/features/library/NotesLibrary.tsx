@@ -2,7 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   Anchor,
   Book,
+  ConceptSummary,
   LibraryNote,
+  conceptsForNote,
   createNote,
   deleteNote,
   listAllNotes,
@@ -11,6 +13,7 @@ import {
   verseAnchor,
   wordAnchor,
 } from "../../lib/api";
+import NoteBody from "../notes/NoteBody";
 import { formatReference, parseReference } from "../../lib/reference";
 
 /**
@@ -159,7 +162,13 @@ export default function NotesLibrary({
             ) : (
               <>
                 {n.title && <h4>{n.title}</h4>}
-                <p className="note-body">{n.body}</p>
+                <NoteBody
+                  noteId={n.note_id}
+                  body={n.body}
+                  translationId={translationId}
+                  onJump={onJump}
+                />
+                <NoteTopics noteId={n.note_id} />
                 <div className="note-actions">
                   {n.anchor && (
                     <button className="link-btn" onClick={() => open(n)}>
@@ -372,5 +381,37 @@ export function ReferenceField({
       )}
       {invalid && <span className="field-hint bad">No such reference</span>}
     </div>
+  );
+}
+
+/**
+ * The topics this note mentions — the backlink direction of the graph.
+ *
+ * Loaded per note rather than with the list: it is a detail of a note you are
+ * already reading, and the list has to stay fast as the corpus grows. A note
+ * the worker hasn't read yet simply shows nothing, which is the truth.
+ */
+function NoteTopics({ noteId }: { noteId: number }) {
+  const [topics, setTopics] = useState<ConceptSummary[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    conceptsForNote(noteId)
+      .then((found) => live && setTopics(found))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [noteId]);
+
+  if (topics.length === 0) return null;
+  return (
+    <p className="note-topics">
+      {topics.map((topic) => (
+        <span key={topic.concept_id} className="note-topic">
+          {topic.label}
+        </span>
+      ))}
+    </p>
   );
 }

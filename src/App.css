@@ -835,6 +835,136 @@ body {
   border-color: #e4cfa6;
 }
 
+/* A scripture reference inside a note: clickable in place, previewed on hover. */
+.verse-ref-wrap {
+  position: relative;
+  white-space: nowrap;
+}
+.verse-ref {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  border-bottom: 1px dotted var(--accent);
+}
+.verse-ref:hover {
+  border-bottom-style: solid;
+}
+.verse-preview {
+  position: absolute;
+  bottom: 1.5em;
+  left: 0;
+  z-index: 20;
+  display: none;
+  width: max-content;
+  max-width: 26rem;
+  white-space: normal;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.12);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.verse-ref-wrap:hover .verse-preview,
+.verse-ref-wrap:focus-within .verse-preview {
+  display: block;
+}
+
+/* Topics a note mentions, under its body in the library. */
+.note-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  margin: 0.4rem 0 0;
+}
+.note-topic {
+  font-size: 0.7rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+/* Topics — a list of chips, then a page of quoted passages. */
+.topics-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.topics-header h2 {
+  margin: 0 0 0.15rem;
+  font-size: 1.35rem;
+}
+.topics-filter {
+  min-width: 12rem;
+}
+.topic-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+.topic-chip {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  cursor: pointer;
+}
+.topic-chip:hover {
+  border-color: var(--accent);
+}
+.topic-label {
+  font-weight: 500;
+}
+.topic-count {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.topic-page {
+  max-width: 46rem;
+}
+.citation-list {
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 0;
+}
+.citation {
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--line);
+}
+.citation-text {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+.citation-text mark {
+  background: var(--accent-soft);
+  color: inherit;
+  border-radius: 3px;
+  padding: 0 0.1em;
+}
+.citation-source {
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.citation-engine {
+  opacity: 0.75;
+}
+
 /* The one action that leaves the machine: made to look like a decision. */
 .escalate-confirm {
   margin: 0.5rem 0 1rem;
