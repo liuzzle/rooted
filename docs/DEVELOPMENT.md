@@ -411,9 +411,29 @@ that happens to be running.
 **Topics → Graph** draws topics as nodes. An edge joins two topics **only where
 one passage mentions both**, and clicking it lists those passages with both
 mentions marked. Similarity is deliberately not drawn: it's a guess, and a line
-on a graph looks like a fact. The layout is Fruchterman–Reingold, run to rest
-before drawing and started from a spiral rather than random positions, so the
-same graph is drawn the same way on every visit.
+on a graph looks like a fact.
+
+It's interactive:
+- **Drag a topic** and the physics runs live, so the topics written alongside
+  it follow.
+- **Drag the background** to pan, **scroll** to zoom around the cursor.
+- **Click** a topic to list what it's written alongside, or a line to read the
+  passages behind it. **Double-click** opens the topic page.
+- **Find** centres a topic by name.
+
+Circles and labels are sized in screen pixels, so zooming spreads the graph out
+instead of inflating it.
+
+The layout (`forceLayout.ts`) is Fruchterman–Reingold, run to rest before the
+first frame and started from a spiral rather than random positions, so the same
+graph opens the same way on every visit. Gravity has to be strong (1 per unit of
+distance): every pair of topics repels, so with weak gravity the graph only
+stops growing at about k·√(n/G). At 0.02 it spread to forty times its intended
+area and was drawn as a thin streak. `forceLayout.test.ts` guards against that.
+
+Double-click is detected in the pointer-up handler, not with `dblclick`: the
+canvas captures the pointer so a drag can't escape it, and capture retargets
+`dblclick` to the canvas.
 
 ## Notes without a reference
 
