@@ -76,7 +76,7 @@ DEFAULT_LANGUAGE = "de"
 
 # Bumped whenever the key or the selection rules change, so notes indexed under
 # the old rules are read again instead of sitting there with stale concepts.
-SCHEME = "phrases/3-lemma"
+SCHEME = "phrases/4-runs"
 
 # A word, keeping its position. Apostrophes and hyphens stay inside a word so
 # "God's" and "self-control" survive as written.
@@ -88,6 +88,14 @@ REPEAT_THRESHOLD = 3
 
 # Longest candidate, in words. Beyond this it's a sentence, not a topic.
 MAX_WORDS = 4
+
+# What may sit between two words of one phrase: spaces, nothing else. A comma,
+# "&", "/", a bullet or a bracket separates two things rather than joining one
+# — without this a list line "Ausharren, Bewahren, Hoffen" became a single
+# four-word topic. A line break ends a phrase too, as it always has (it counts
+# as a sentence start): these notes are written as indented lists, where each
+# line is its own item, and a phrase that merely wrapped keeps its words.
+PHRASE_GAP = re.compile(r"[ \u00a0]+")
 
 
 @dataclass(frozen=True)
@@ -317,7 +325,14 @@ def sentence_starts(text: str) -> set[int]:
     the space after it, and what matters is where the next word actually
     starts. Getting this wrong makes every capitalised word look like a name.
     """
-    return {m.end() for m in re.finditer(r"(?:^|[.!?:;\n]\s*)", text)}
+    # A list item's first word is in the same position as a sentence's: after
+    # a bullet or a number, its capital is layout, not evidence.
+    return {
+        m.end()
+        for m in re.finditer(
+            r"(?:^|[.!?:;\n]\s*)(?:(?:[-–•*]|\d+[.)])\s+)?", text
+        )
+    }
 
 
 @dataclass
@@ -386,9 +401,17 @@ def collect_candidates(text: str, lang: str,
             add(" ".join(w for w, _ in run), True, run[0][1] not in starts, len(run))
         run = []
 
+    previous_end: Optional[int] = None
     for surface, start, end in words:
         capitalised = surface[:1].isupper()
-        content = len(surface) >= 3 and not is_stopword(surface, lang)
+        # "V10" is a verse marker and "2000er" a date: a word with a digit in
+        # it points at something rather than naming a subject.
+        content = (len(surface) >= 3 and not is_stopword(surface, lang)
+                   and not any(ch.isdigit() for ch in surface))
+        if previous_end is not None and not PHRASE_GAP.fullmatch(
+                text[previous_end:start]):
+            flush_run()
+        previous_end = end
         # A phrase cannot span a full stop. Without this, a sentence ending in
         # a noun and the next one opening with a name become one "phrase".
         if start in starts:

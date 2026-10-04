@@ -192,6 +192,44 @@ class GermanTest(unittest.TestCase):
                 concepts.locate(GERMAN_NOTE, label), f"{label!r} is not in the note"
             )
 
+    # Each of these is a line from a real note that used to come out as one
+    # fused "topic".
+
+    def phrases(self, text: str) -> list[str]:
+        return [
+            c.label
+            for c in concepts.collect_candidates(text, "de").values()
+            if c.words > 1
+        ]
+
+    def test_a_list_line_is_several_things_not_one(self):
+        text = "vor 2000 Jahren\n\t- Ausharren, Bewahren, Hoffen"
+        self.assertEqual(self.phrases(text), [])
+
+    def test_separators_end_a_phrase(self):
+        for text in ["Macht & Gerechtigkeit", "Christus / König / Sohn",
+                     "Plan, Willen Gottes", "Opfer:\n\t\t- Lieblichkeiten"]:
+            for phrase in self.phrases(text):
+                self.assertNotIn(",", phrase)
+                self.assertFalse({"Macht Gerechtigkeit", "Christus König Sohn",
+                                  "Opfer Lieblichkeiten"} & {phrase}, text)
+        self.assertEqual(self.phrases("Plan, Willen Gottes"), ["Willen Gottes"])
+
+    def test_a_verse_marker_is_not_a_topic(self):
+        text = "Tod (V9) -> im Tod (V10) -> Auferstehung (V11). V10 und V10."
+        labels = concepts.deterministic_labels(text, "de")
+        self.assertFalse([label for label in labels if any(ch.isdigit() for ch in label)])
+
+    def test_a_phrase_is_words_with_only_spaces_between(self):
+        self.assertIn("Heilige Geist", self.phrases("Der Heilige Geist kam."))
+        # Each line of a list is its own item.
+        self.assertEqual(self.phrases("Wohnungen\n\t\tGott"), [])
+
+    def test_a_bullet_does_not_earn_a_capital(self):
+        """After "- " a capital is layout, like after a full stop."""
+        starts = concepts.sentence_starts("Notizen\n\t- Ausharren")
+        self.assertIn("Notizen\n\t- Ausharren".index("Ausharren"), starts)
+
     def test_a_german_note_indexes_to_one_concept_per_word(self):
         """End to end: the declined forms must land on a single concept."""
         tmp = tempfile.TemporaryDirectory()

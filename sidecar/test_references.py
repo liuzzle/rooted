@@ -73,6 +73,40 @@ class GermanReferenceTest(unittest.TestCase):
         found = r.find_references("Joh 3,16 und Röm 4,3 und Ps 23,1")
         self.assertEqual([f.book_osis for f in found], ["John", "Rom", "Ps"])
 
+    # The next ones are written the way the real notes write them.
+
+    def ids(self, text: str) -> list[str]:
+        return [f.verse_id or f"{f.book_osis}.{f.chapter}" for f in r.find_references(text)]
+
+    def test_a_verse_added_to_a_reference_is_found(self):
+        self.assertEqual(self.ids("Hebräer 10, 5 - 10 + 14"), ["Heb.10.5", "Heb.10.14"])
+        self.assertEqual(self.ids("Joh 3,16 und 18"), ["John.3.16", "John.3.18"])
+
+    def test_a_chapter_added_to_a_reference_keeps_the_book(self):
+        self.assertEqual(self.ids("Apg 2, 22-32 + 13,35"), ["Acts.2.22", "Acts.13.35"])
+        self.assertEqual(self.ids("Röm 4,3; 5,1"), ["Rom.4.3", "Rom.5.1"])
+        self.assertEqual(self.ids("Ps 23 + 24"), ["Ps.23", "Ps.24"])
+
+    def test_a_continuation_is_marked_where_it_is_written(self):
+        text = "Apg 2, 22-32 + 13,35"
+        added = r.find_references(text)[1]
+        self.assertEqual(text[added.start:added.end], "13,35")
+
+    def test_a_number_that_starts_new_words_is_not_a_continuation(self):
+        self.assertEqual(self.ids("Joh 3,16 und 2 Kinder kamen"), ["John.3.16"])
+        self.assertEqual(self.ids("Joh 3,16 + 2. Mose 1,1"), ["John.3.16", "Exod.1.1"])
+
+    def test_a_numbered_list_is_not_an_ordinal(self):
+        """ "2. Johannes 14, 15" in a numbered list is John 14 — 2 John has
+        one chapter. Where the chapter exists, the ordinal reading stands."""
+        self.assertEqual(self.ids("2. Johannes 14, 15 - 20"), ["John.14.15"])
+        self.assertEqual(self.ids("3. Johannes 14, 2 - 6"), ["John.14.2"])
+        self.assertEqual(self.ids("2. Johannes 1,5"), ["2John.1.5"])
+        self.assertEqual(self.ids("4. 2. Thessalonicher 1, 6"), ["2Thess.1.6"])
+        text = "2. Johannes 14, 15"
+        ref = r.find_references(text)[0]
+        self.assertEqual(text[ref.start:ref.end], "Johannes 14, 15")
+
 
 class StoredReferenceTest(unittest.TestCase):
     """Through the worker: found once, positioned in the note."""

@@ -195,6 +195,29 @@ REFERENCE = re.compile(
 )
 
 
+# Chapters in each book whose name starts with an ordinal. Needed to read
+# numbered lists: in "2. Johannes 14, 15" the 2 is the list item, not the
+# second letter of John — which has one chapter. "1. Mose" is not here: "Mose"
+# alone is no book, so there is nothing to confuse it with.
+ORDINAL_CHAPTERS = {
+    "1Sam": 31, "2Sam": 24, "1Kgs": 22, "2Kgs": 25, "1Chr": 29, "2Chr": 36,
+    "1Cor": 16, "2Cor": 13, "1Thess": 5, "2Thess": 3, "1Tim": 6, "2Tim": 4,
+    "1Pet": 5, "2Pet": 3, "1John": 5, "2John": 1, "3John": 1,
+}
+
+# What may continue a reference: "Hebräer 10,5-10 + 14", "Apg 2,22-32 + 13,35",
+# "Röm 4,3; 5,1", "Joh 3,16 und 18". A comma is deliberately *not* a joiner —
+# "Joh 3,16, 4" is too ambiguous to guess at.
+CONTINUATION = re.compile(
+    r"\s*(?:\+|;|\bund\b|\band\b|&)\s*"
+    r"(?:(?P<chapter>\d{1,3})\s*[,:]\s*)?"
+    r"(?P<verse>\d{1,3})(?![\d.]*\s*\.\s*[A-ZÄÖÜ])"
+    r"(?:\s*[-–]\s*(?P<verse_end>\d{1,3}))?"
+    r"(?!\s*[.]?\s*[A-Za-zÄÖÜäöü])",
+    re.IGNORECASE,
+)
+
+
 def find_references(text: str) -> list[Reference]:
     """Every scripture reference written in `text`.
 
@@ -208,17 +231,68 @@ def find_references(text: str) -> list[Reference]:
         osis = LOOKUP.get(_normalise(match.group("book")))
         if osis is None:
             continue
+        start = match.start()
+        chapter = int(match.group("chapter"))
+        if chapter > ORDINAL_CHAPTERS.get(osis, chapter):
+            # A chapter this book doesn't have: the ordinal was a list number.
+            book = match.group("book")
+            bare = re.sub(r"^\d\s*\.?\s*", "", book)
+            osis = LOOKUP.get(_normalise(bare))
+            if osis is None:
+                continue
+            start = match.start("book") + len(book) - len(bare)
         verse = match.group("verse")
         verse_end = match.group("verse_end")
-        found.append(
-            Reference(
-                start=match.start(),
-                end=match.end(),
-                surface=match.group(0),
-                book_osis=osis,
-                chapter=int(match.group("chapter")),
-                verse=int(verse) if verse else None,
-                verse_end=int(verse_end) if verse_end else None,
-            )
+        ref = Reference(
+            start=start,
+            end=match.end(),
+            surface=text[start:match.end()],
+            book_osis=osis,
+            chapter=chapter,
+            verse=int(verse) if verse else None,
+            verse_end=int(verse_end) if verse_end else None,
         )
+        found.append(ref)
+        found.extend(_continuations(text, ref))
     return found
+
+
+def _continuations(text: str, first: Reference) -> list[Reference]:
+    """The references that carry on from `first` without repeating the book.
+
+    Each gets its own span — only the numbers written — so it is clickable
+    where it was written. A bare number continues the previous reference's
+    chapter when that named a verse ("10,5-10 + 14" is verse 14), and is a
+    chapter when it didn't ("Ps 23 + 24"). "13,35" names both.
+
+    A number followed by a word is left alone: in "Joh 3,16 und 2 Kinder" the
+    2 belongs to the words after it, not to John.
+    """
+    out: list[Reference] = []
+    previous = first
+    at = first.end
+    while True:
+        m = CONTINUATION.match(text, at)
+        if not m:
+            return out
+        number = int(m.group("verse"))
+        end_number = int(m.group("verse_end")) if m.group("verse_end") else None
+        if m.group("chapter"):
+            chapter, verse = int(m.group("chapter")), number
+        elif previous.verse is not None:
+            chapter, verse = previous.chapter, number
+        else:
+            chapter, verse, end_number = number, None, None
+        start = m.start("chapter") if m.group("chapter") else m.start("verse")
+        ref = Reference(
+            start=start,
+            end=m.end(),
+            surface=text[start:m.end()],
+            book_osis=first.book_osis,
+            chapter=chapter,
+            verse=verse,
+            verse_end=end_number,
+        )
+        out.append(ref)
+        previous = ref
+        at = m.end()
