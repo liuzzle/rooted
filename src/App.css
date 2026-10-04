@@ -1001,12 +1001,37 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+.graph-stage {
+  min-width: 0;
+}
+.graph-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.graph-find {
+  flex: 1;
+  min-width: 0;
+}
 .graph-canvas {
+  display: block;
   width: 100%;
   height: min(70vh, 44rem);
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--panel);
+  cursor: grab;
+  /* The canvas handles its own panning and zooming. */
+  touch-action: none;
+  user-select: none;
+}
+.graph-canvas.panning {
+  cursor: grabbing;
+}
+.graph-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
 }
 .graph-edge {
   cursor: pointer;
@@ -1030,23 +1055,41 @@ body {
 .graph-node circle {
   fill: var(--accent-soft);
   stroke: var(--accent);
-  stroke-width: 1.5;
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
 }
-.graph-node:hover circle {
+.graph-node:hover circle,
+.graph-node.selected circle {
   fill: var(--accent);
 }
+.graph-node.selected circle {
+  stroke-width: 3px;
+}
 .graph-node text {
-  font-size: 12px;
   text-anchor: middle;
   fill: var(--ink);
   paint-order: stroke;
   stroke: var(--panel);
-  stroke-width: 3px;
   pointer-events: none;
 }
 .graph-side h3 {
   margin: 0 0 0.2rem;
   font-size: 1rem;
+}
+.graph-side-sub {
+  margin: 0.9rem 0 0.3rem;
+  font-size: 0.8rem;
+  font-weight: normal;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.graph-neighbours {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
 }
 
 /* Search — two lanes of quoted passages, each saying how it was found. */
