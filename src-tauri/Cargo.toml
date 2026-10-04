@@ -31,3 +31,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
 
+
+# Search and verse suggestions compare a query against every verse vector of a
+# translation (~31k × 1024 floats). Unoptimised, that took 4 s for one note in
+# `tauri dev`; at opt-level 1 it takes 0.3 s, about what a release build does,
+# and an incremental rebuild still takes ~2 s. Only this crate is affected.
+[profile.dev.package.rooted]
+opt-level = 1

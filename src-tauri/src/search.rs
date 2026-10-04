@@ -155,13 +155,13 @@ fn normalise(v: &mut [f32]) {
     }
 }
 
-fn unpack(blob: &[u8]) -> Vec<f32> {
+pub(crate) fn unpack(blob: &[u8]) -> Vec<f32> {
     blob.chunks_exact(4)
         .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect()
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
+pub(crate) fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
@@ -183,7 +183,7 @@ struct CachedVerses {
 }
 
 impl VectorCache {
-    fn nearest(
+    pub(crate) fn nearest(
         &self,
         conn: &Connection,
         translation_id: i64,
@@ -242,14 +242,19 @@ impl VectorCache {
         if cached.dim != query.len() {
             return Ok(Vec::new());
         }
+        // Score by position and copy an id only for what clears the floor:
+        // cloning thirty thousand ids per query cost more than the arithmetic.
         Ok(top_k(
             cached
                 .flat
                 .chunks_exact(cached.dim.max(1))
-                .zip(&cached.ids)
-                .map(|(v, id)| (id.clone(), dot(v, query))),
+                .enumerate()
+                .map(|(i, v)| (i, dot(v, query))),
             floor,
-        ))
+        )
+        .into_iter()
+        .map(|(i, score)| (cached.ids[i].clone(), score))
+        .collect())
     }
 }
 
@@ -591,6 +596,22 @@ pub fn search(
                     .insert(note_id);
             }
         }
+        // A verse a person accepted for a matching note is linked as surely as
+        // one the note wrote down.
+        let accepted: Vec<(i64, String)> = collect(
+            conn,
+            &format!(
+                "SELECT DISTINCT vs.note_id, vs.verse_id FROM verse_suggestions vs
+                   JOIN sources s ON s.note_id = vs.note_id
+                   JOIN chunks ch ON ch.source_id = s.source_id
+                  WHERE ch.chunk_id IN ({list}) AND vs.status = 'accepted'"
+            ),
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        for (note_id, verse_id) in accepted {
+            cited_by.entry(verse_id).or_default().insert(note_id);
+        }
         let mut cited: Vec<(&String, usize)> =
             cited_by.iter().map(|(id, notes)| (id, notes.len())).collect();
         cited.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
@@ -811,6 +832,23 @@ mod tests {
         assert_eq!(bible[0].verse_id, "Rom.4.3");
         assert_eq!(bible[0].matched_by, vec!["words", "cited"]);
         assert_eq!(bible[0].cited_by, 1);
+    }
+
+    #[test]
+    fn a_verse_accepted_for_a_matching_note_counts_as_cited() {
+        let conn = fixture();
+        note(&conn, "Erbe", "Das Los und das Erbe.");
+        verse(&conn, "Ps.16.5", "Jehova ist das Teil meines Erbteils und meines Bechers.");
+        conn.execute(
+            "INSERT INTO verse_suggestions (note_id, verse_id, status) VALUES (1, 'Ps.16.5', 'accepted')",
+            [],
+        )
+        .unwrap();
+
+        let (_, bible) = run(&conn, "Los");
+
+        assert_eq!(bible.len(), 1);
+        assert_eq!(bible[0].matched_by, vec!["cited"]);
     }
 
     #[test]

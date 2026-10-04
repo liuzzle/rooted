@@ -2,6 +2,7 @@ mod db;
 mod graph;
 mod ingest;
 mod packs;
+mod review;
 mod search;
 mod sidecar;
 
@@ -380,6 +381,82 @@ fn get_verse_text(
     graph::verse_text(&conn, translation_id, &verse_id)
 }
 
+// --- review: merges and verse suggestions -----------------------------------
+
+/// Merge one topic into another. Only ever on a person's say-so.
+#[tauri::command]
+fn merge_concepts(state: State<Db>, from: i64, into: i64) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    review::merge_concepts(&mut conn, from, into)
+}
+
+/// Undo a merge: the spelling becomes its own topic again once re-read.
+#[tauri::command]
+fn unmerge_concept(state: State<Db>, key: String) -> Result<(), String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    review::unmerge(&mut conn, &key)
+}
+
+#[tauri::command]
+fn mark_concepts_distinct(state: State<Db>, a: i64, b: i64) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    review::mark_distinct(&conn, a, b)
+}
+
+#[tauri::command]
+fn concept_aliases(state: State<Db>, concept_id: i64) -> Result<Vec<review::Alias>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    review::aliases(&conn, concept_id)
+}
+
+/// Pairs of topics that may be one. Empty until a model has read the labels.
+#[tauri::command]
+fn merge_suggestions(
+    state: State<Db>,
+    limit: usize,
+) -> Result<Vec<review::MergeSuggestion>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    match search::embedding_config(&conn)? {
+        Some(c) => review::merge_suggestions(&conn, &c.model, review::MERGE_FLOOR, limit),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Verses accepted for a note, and — when `suggest` — verses offered for it.
+/// Works from stored vectors, so it needs no model running, only one that has
+/// read the text. Suggesting compares every passage with every verse, so it
+/// happens on request rather than for every note the library lists.
+#[tauri::command]
+fn note_verses(
+    state: State<Db>,
+    cache: State<search::VectorCache>,
+    note_id: i64,
+    translation_id: i64,
+    suggest: bool,
+) -> Result<review::NoteVerses, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let model = if suggest {
+        search::embedding_config(&conn)?.map(|c| c.model)
+    } else {
+        None
+    };
+    review::verses_for_note(&conn, note_id, translation_id, model.as_deref(), &cache)
+}
+
+/// "accepted", "dismissed", or null to forget the decision.
+#[tauri::command]
+fn decide_verse(
+    state: State<Db>,
+    note_id: i64,
+    verse_id: String,
+    status: Option<String>,
+    score: Option<f32>,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let model = search::embedding_config(&conn)?.map(|c| c.model);
+    review::decide_verse(&conn, note_id, &verse_id, status.as_deref(), score, model.as_deref())
+}
+
 // --- search ----------------------------------------------------------------
 
 /// Search notes and the Bible in the translation being read.
@@ -604,6 +681,13 @@ pub fn run() {
             get_verse_text,
             search,
             concept_graph,
+            merge_concepts,
+            unmerge_concept,
+            mark_concepts_distinct,
+            concept_aliases,
+            merge_suggestions,
+            note_verses,
+            decide_verse,
             shared_passages,
             delete_job,
             worker_status
