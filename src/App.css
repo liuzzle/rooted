@@ -965,6 +965,148 @@ body {
   opacity: 0.75;
 }
 
+/* Verses on a note: linked ones as chips, offered ones behind a toggle. */
+.note-verses {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+}
+.linked-verses {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.3rem;
+  margin: 0;
+}
+.note-verses-label {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+.linked-verse {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  font-size: 0.75rem;
+  padding: 0.05rem 0.2rem 0.05rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+}
+.unlink {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+}
+.unlink:hover {
+  color: var(--ink);
+}
+.suggest-toggle {
+  font-size: 0.75rem;
+  margin-top: 0.25rem;
+}
+.verse-suggestions {
+  list-style: none;
+  margin: 0.3rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+.verse-suggestion {
+  border-left: 2px dashed var(--line);
+  padding-left: 0.6rem;
+}
+.verse-suggestion-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.suggest-actions {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+.verse-suggestion .citation-text {
+  font-size: 0.85rem;
+}
+.suggest-reason {
+  margin: 0.15rem 0 0;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+/* Merging topics: offered pairs on the list, aliases and a picker on a page. */
+.merge-review {
+  margin-top: 0.9rem;
+}
+.merge-pairs {
+  list-style: none;
+  padding: 0;
+  margin: 0.5rem 0 0;
+  display: grid;
+  gap: 0.6rem;
+  max-width: 52rem;
+}
+.merge-pair {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  padding: 0.7rem 0.85rem;
+}
+.merge-sides {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+  gap: 0.8rem;
+}
+.merge-side h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.95rem;
+}
+.merge-side .citation-text {
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+.merge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.6rem;
+}
+.topic-merges {
+  margin: 0.6rem 0 0.4rem;
+  font-size: 0.85rem;
+}
+.topic-aliases {
+  margin: 0 0 0.3rem;
+  color: var(--muted);
+}
+.topic-alias {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-right: 0.6rem;
+  color: var(--ink);
+}
+.merge-picker {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 28rem;
+  margin-top: 0.3rem;
+}
+.merge-matches {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.15rem;
+}
+.merge-confirm {
+  margin: 0;
+}
+
 /* Topic graph — drawn once, at rest; lines are evidence, so they're clickable. */
 .topics-controls {
   display: flex;

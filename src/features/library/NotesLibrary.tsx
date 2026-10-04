@@ -14,6 +14,7 @@ import {
   wordAnchor,
 } from "../../lib/api";
 import NoteBody from "../notes/NoteBody";
+import NoteVerses from "../notes/NoteVerses";
 import type { NoteFocus } from "../../App";
 import { formatReference, parseReference } from "../../lib/reference";
 
@@ -200,6 +201,11 @@ export default function NotesLibrary({
                   onJump={onJump}
                 />
                 <NoteTopics noteId={n.note_id} />
+                <NoteVerses
+                  noteId={n.note_id}
+                  translationId={translationId}
+                  onJump={onJump}
+                />
                 <div className="note-actions">
                   {n.anchor && (
                     <button className="link-btn" onClick={() => open(n)}>

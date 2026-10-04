@@ -662,3 +662,90 @@ export interface SharedPassage {
 export function sharedPassages(a: number, b: number): Promise<SharedPassage[]> {
   return invoke("shared_passages", { a, b });
 }
+
+// --- review: merging topics, suggesting verses -----------------------------
+
+/** One side of a possible merge, with one passage that says it. */
+export interface MergeSide {
+  concept_id: number;
+  label: string;
+  notes: number;
+  mentions: number;
+  sample: string | null;
+  sample_marks: [number, number][];
+}
+
+export interface MergeSuggestion {
+  a: MergeSide;
+  b: MergeSide;
+  score: number;
+}
+
+export function mergeSuggestions(limit = 12): Promise<MergeSuggestion[]> {
+  return invoke("merge_suggestions", { limit });
+}
+
+/** Merge `from` into `into`: its mentions move, its spelling becomes an alias. */
+export function mergeConcepts(from: number, into: number): Promise<void> {
+  return invoke("merge_concepts", { from, into });
+}
+
+/** Never suggest this pair again. */
+export function markConceptsDistinct(a: number, b: number): Promise<void> {
+  return invoke("mark_concepts_distinct", { a, b });
+}
+
+export interface ConceptAlias {
+  key: string;
+  label: string;
+  merged_at: string;
+}
+
+export function conceptAliases(conceptId: number): Promise<ConceptAlias[]> {
+  return invoke("concept_aliases", { conceptId });
+}
+
+/** Undo a merge; the spelling returns as its own topic once notes are re-read. */
+export function unmergeConcept(key: string): Promise<void> {
+  return invoke("unmerge_concept", { key });
+}
+
+export interface NoteVerse {
+  verse_id: string;
+  book_osis: string;
+  book_name: string;
+  chapter: number;
+  verse: number;
+  /** In the translation being read; null when it lacks the verse. */
+  text: string | null;
+  score: number | null;
+  /** The passage of the note it's close to — why it's offered. */
+  passage: string | null;
+}
+
+export interface NoteVerses {
+  suggested: NoteVerse[];
+  accepted: NoteVerse[];
+}
+
+/**
+ * Verses linked to a note; with `suggest`, also the ones offered for it.
+ * Suggesting compares every passage with every verse, so ask only on request.
+ */
+export function noteVerses(
+  noteId: number,
+  translationId: number,
+  suggest = false,
+): Promise<NoteVerses> {
+  return invoke("note_verses", { noteId, translationId, suggest });
+}
+
+/** Accept or dismiss a suggested verse; null forgets the decision. */
+export function decideVerse(
+  noteId: number,
+  verseId: string,
+  status: "accepted" | "dismissed" | null,
+  score: number | null = null,
+): Promise<void> {
+  return invoke("decide_verse", { noteId, verseId, status, score });
+}

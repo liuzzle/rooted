@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   Citation,
+  ConceptAlias,
   ConceptPage,
   ConceptSummary,
+  conceptAliases,
   getConcept,
   listConcepts,
+  mergeConcepts,
+  unmergeConcept,
 } from "../../lib/api";
+import MergeReview from "./MergeReview";
 import TopicGraph from "./TopicGraph";
 
 /**
@@ -54,7 +59,11 @@ export default function Topics({
     return (
       <TopicPage
         page={open}
-        onBack={() => setOpen(null)}
+        onBack={() => {
+          setOpen(null);
+          refresh();
+        }}
+        onReload={() => openTopic(open.concept_id)}
         onOpenNote={onOpenNote}
       />
     );
@@ -102,6 +111,8 @@ export default function Topics({
 
       {error && <p className="notes-error">{error}</p>}
 
+      {mode === "list" && <MergeReview onChanged={refresh} />}
+
       {mode === "list" && !loading && concepts.length === 0 && (
         <p className="empty">
           {filter.trim()
@@ -131,10 +142,12 @@ export default function Topics({
 function TopicPage({
   page,
   onBack,
+  onReload,
   onOpenNote,
 }: {
   page: ConceptPage;
   onBack: () => void;
+  onReload: () => void;
   onOpenNote: (noteId: number) => void;
 }) {
   return (
@@ -148,6 +161,8 @@ function TopicPage({
         {page.notes} note{page.notes === 1 ? "" : "s"}. Every passage below is
         quoted from the note it names.
       </p>
+
+      <TopicMerges conceptId={page.concept_id} label={page.label} onChanged={onReload} />
 
       <ul className="citation-list">
         {page.citations.map((cited, i) => (
@@ -185,5 +200,134 @@ function CitedSnippet({ cited }: { cited: Citation }) {
       <mark>{marked}</mark>
       {after}
     </blockquote>
+  );
+}
+
+/**
+ * The spellings merged into this topic, each undoable, and a way to merge
+ * another topic in by hand — for the paraphrases that similarity can't see
+ * ("Gnade" and "unverdiente Gunst" score lower than "Abraham" and "Isaak").
+ */
+function TopicMerges({
+  conceptId,
+  label,
+  onChanged,
+}: {
+  conceptId: number;
+  label: string;
+  onChanged: () => void;
+}) {
+  const [aliases, setAliases] = useState<ConceptAlias[]>([]);
+  const [picking, setPicking] = useState(false);
+  const [query, setQuery] = useState("");
+  const [matches, setMatches] = useState<ConceptSummary[]>([]);
+  const [chosen, setChosen] = useState<ConceptSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    conceptAliases(conceptId)
+      .then(setAliases)
+      .catch((e) => setError(String(e)));
+  }, [conceptId]);
+
+  useEffect(refresh, [refresh]);
+
+  useEffect(() => {
+    if (!picking) return;
+    const id = setTimeout(() => {
+      listConcepts(query.trim() || null, 12)
+        .then((found) => setMatches(found.filter((c) => c.concept_id !== conceptId)))
+        .catch((e) => setError(String(e)));
+    }, 150);
+    return () => clearTimeout(id);
+  }, [picking, query, conceptId]);
+
+  async function run(action: () => Promise<void>) {
+    try {
+      await action();
+      setChosen(null);
+      setPicking(false);
+      setQuery("");
+      refresh();
+      onChanged();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  return (
+    <div className="topic-merges">
+      {error && <p className="notes-error">{error}</p>}
+      {aliases.length > 0 && (
+        <p className="topic-aliases">
+          Also written as{" "}
+          {aliases.map((a) => (
+            <span key={a.key} className="topic-alias">
+              {a.label}
+              <button
+                className="link-btn"
+                title={`Make “${a.label}” its own topic again`}
+                onClick={() => run(() => unmergeConcept(a.key))}
+              >
+                undo
+              </button>
+            </span>
+          ))}
+        </p>
+      )}
+
+      {!picking && (
+        <button className="link-btn" onClick={() => setPicking(true)}>
+          Merge another topic into this one…
+        </button>
+      )}
+
+      {picking && (
+        <div className="merge-picker">
+          <input
+            autoFocus
+            value={query}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setChosen(null);
+            }}
+            placeholder="Find the topic that means the same"
+          />
+          {!chosen && (
+            <ul className="merge-matches">
+              {matches.map((c) => (
+                <li key={c.concept_id}>
+                  <button className="link-btn" onClick={() => setChosen(c)}>
+                    {c.label}
+                  </button>{" "}
+                  <span className="topic-count">
+                    {c.notes} note{c.notes === 1 ? "" : "s"}
+                  </span>
+                </li>
+              ))}
+              {matches.length === 0 && <li className="card-note">No other topic matches.</li>}
+            </ul>
+          )}
+          {chosen && (
+            <p className="merge-confirm">
+              Every mention of “{chosen.label}” will be filed under “{label}”, and
+              “{chosen.label}” will be remembered as another way of writing it.{" "}
+              <button
+                className="ghost-btn"
+                onClick={() => run(() => mergeConcepts(chosen.concept_id, conceptId))}
+              >
+                Merge
+              </button>{" "}
+              <button className="link-btn" onClick={() => setChosen(null)}>
+                back
+              </button>
+            </p>
+          )}
+          <button className="link-btn" onClick={() => setPicking(false)}>
+            cancel
+          </button>
+        </div>
+      )}
+    </div>
   );
 }
