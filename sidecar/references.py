@@ -189,8 +189,10 @@ _NAMES = sorted(FORMS, key=len, reverse=True)
 REFERENCE = re.compile(
     r"\b(?P<book>" + "|".join(re.escape(n) for n in _NAMES) + r")\.?\s*"
     r"(?P<chapter>\d{1,3})"
-    r"(?:\s*[,:.]\s*(?P<verse>\d{1,3})"
-    r"(?:\s*[-–]\s*(?P<verse_end>\d{1,3}))?)?",
+    # Spaces only, never a line break: in a list, "18,20" ends one line and
+    # "- 5. Mose 10,9" starts the next, and must not be read as verses 20–5.
+    r"(?:[ \t]*[,:.][ \t]*(?P<verse>\d{1,3})"
+    r"(?:[ \t]*[-–][ \t]*(?P<verse_end>\d{1,3}))?)?",
     re.IGNORECASE,
 )
 
@@ -209,10 +211,10 @@ ORDINAL_CHAPTERS = {
 # "Röm 4,3; 5,1", "Joh 3,16 und 18". A comma is deliberately *not* a joiner —
 # "Joh 3,16, 4" is too ambiguous to guess at.
 CONTINUATION = re.compile(
-    r"\s*(?:\+|;|\bund\b|\band\b|&)\s*"
-    r"(?:(?P<chapter>\d{1,3})\s*[,:]\s*)?"
+    r"[ \t]*(?:\+|;|\bund\b|\band\b|&)[ \t]*"
+    r"(?:(?P<chapter>\d{1,3})[ \t]*[,:][ \t]*)?"
     r"(?P<verse>\d{1,3})(?![\d.]*\s*\.\s*[A-ZÄÖÜ])"
-    r"(?:\s*[-–]\s*(?P<verse_end>\d{1,3}))?"
+    r"(?:[ \t]*[-–][ \t]*(?P<verse_end>\d{1,3}))?"
     r"(?!\s*[.]?\s*[A-Za-zÄÖÜäöü])",
     re.IGNORECASE,
 )

@@ -705,14 +705,22 @@ class Worker:
         write first.
         """
         key = concepts.key_of(label, lang)
-        self.conn.execute(
-            "INSERT INTO concepts (label, key) VALUES (?, ?)"
-            " ON CONFLICT(key) DO NOTHING",
-            (label, key),
-        )
-        concept_id = self.conn.execute(
-            "SELECT concept_id FROM concepts WHERE key = ?", (key,)
-        ).fetchone()["concept_id"]
+        # A spelling a person merged into another topic goes to that topic;
+        # without this, the next re-read would quietly undo the merge.
+        alias = self.conn.execute(
+            "SELECT concept_id FROM concept_aliases WHERE key = ?", (key,)
+        ).fetchone()
+        if alias is not None:
+            concept_id = alias["concept_id"]
+        else:
+            self.conn.execute(
+                "INSERT INTO concepts (label, key) VALUES (?, ?)"
+                " ON CONFLICT(key) DO NOTHING",
+                (label, key),
+            )
+            concept_id = self.conn.execute(
+                "SELECT concept_id FROM concepts WHERE key = ?", (key,)
+            ).fetchone()["concept_id"]
         self.conn.execute(
             """INSERT INTO concept_mentions
                  (concept_id, chunk_id, char_start, char_end, surface,
@@ -811,6 +819,29 @@ class Worker:
                         "UPDATE chunks SET embedding = ?, embedded_by = ?"
                         " WHERE chunk_id = ?",
                         [(embeddings.pack(v), model, r["chunk_id"])
+                         for r, v in zip(rows, vectors)],
+                    )
+                done += len(rows)
+
+            # Topic labels, for merge suggestions. Few, short, and only the ones
+            # something still cites.
+            while time.monotonic() < deadline:
+                rows = self.conn.execute(
+                    """SELECT c.concept_id, c.label FROM concepts c
+                        WHERE (c.embedded_by IS NULL OR c.embedded_by <> ?)
+                          AND EXISTS (SELECT 1 FROM concept_mentions m
+                                       WHERE m.concept_id = c.concept_id)
+                        ORDER BY c.concept_id LIMIT ?""",
+                    (model, embeddings.BATCH),
+                ).fetchall()
+                if not rows:
+                    break
+                vectors = embeddings.embed([r["label"] for r in rows], model)
+                with self.transaction():
+                    self.conn.executemany(
+                        "UPDATE concepts SET embedding = ?, embedded_by = ?"
+                        " WHERE concept_id = ?",
+                        [(embeddings.pack(v), model, r["concept_id"])
                          for r, v in zip(rows, vectors)],
                     )
                 done += len(rows)

@@ -96,6 +96,11 @@ class GermanReferenceTest(unittest.TestCase):
         self.assertEqual(self.ids("Joh 3,16 und 2 Kinder kamen"), ["John.3.16"])
         self.assertEqual(self.ids("Joh 3,16 + 2. Mose 1,1"), ["John.3.16", "Exod.1.1"])
 
+    def test_a_reference_ends_at_the_end_of_its_line(self):
+        text = "4. Mose 18,20 \n\t\t- 5. Mose 10, 9"
+        self.assertEqual(self.ids(text), ["Num.18.20", "Deut.10.9"])
+        self.assertIsNone(r.find_references(text)[0].verse_end)
+
     def test_a_numbered_list_is_not_an_ordinal(self):
         """ "2. Johannes 14, 15" in a numbered list is John 14 — 2 John has
         one chapter. Where the chapter exists, the ordinal reading stands."""

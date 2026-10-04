@@ -340,6 +340,44 @@ class IndexingTest(unittest.TestCase):
         self.assertEqual(len(keys), len(set(keys)))
         self.assertIn(concepts.key_of("covenant", "en"), keys)
 
+    def merge(self, from_label: str, into_label: str) -> int:
+        """What the app does when a person merges two topics."""
+        row = lambda label: self.conn.execute(
+            "SELECT concept_id, key, label FROM concepts WHERE label = ?", (label,)
+        ).fetchone()
+        src, dst = row(from_label), row(into_label)
+        self.conn.execute(
+            "UPDATE OR IGNORE concept_mentions SET concept_id = ? WHERE concept_id = ?",
+            (dst["concept_id"], src["concept_id"]),
+        )
+        self.conn.execute(
+            "INSERT INTO concept_aliases (key, concept_id, label) VALUES (?, ?, ?)",
+            (src["key"], dst["concept_id"], src["label"]),
+        )
+        self.conn.execute("DELETE FROM concepts WHERE concept_id = ?", (src["concept_id"],))
+        return dst["concept_id"]
+
+    def test_a_merge_survives_the_note_being_read_again(self):
+        """Re-reading must not quietly bring a merged topic back."""
+        note_id = self.add_note(NOTE)
+        self.worker.index_notes()
+        labels = {r["label"] for r in self.conn.execute("SELECT label FROM concepts")}
+        self.assertTrue({"Abraham", "Isaac"} <= labels, labels)
+        survivor = self.merge("Isaac", "Abraham")
+
+        self.conn.execute(
+            "UPDATE notes SET body = body || ' Isaac again.' WHERE note_id = ?", (note_id,)
+        )
+        self.worker.index_notes()
+
+        labels = {r["label"] for r in self.conn.execute("SELECT label FROM concepts")}
+        self.assertNotIn("Isaac", labels)
+        isaac = self.conn.execute(
+            "SELECT concept_id FROM concept_mentions WHERE surface = 'Isaac'"
+        ).fetchall()
+        self.assertTrue(isaac)
+        self.assertTrue(all(r["concept_id"] == survivor for r in isaac))
+
     def test_an_unread_note_is_read_once_and_then_left_alone(self):
         self.add_note(NOTE)
         self.assertEqual(self.worker.index_notes(), 1)
