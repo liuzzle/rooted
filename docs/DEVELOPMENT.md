@@ -82,15 +82,17 @@ the `ROOTED_DB` environment variable, or the import script's `--db` flag.
 
 | Path | Purpose |
 |------|---------|
-| `src/App.tsx` | Shell: Read · Notes · Dashboard views, active translation, pack modal. |
-| `src/features/` | `reader/` (reading pane), `notes/` (note panel + chapter rail), `library/` (all notes), `dashboard/`, `translations/` (pack manager), `ingest/` (upload, pipeline status, review). |
+| `src/App.tsx` | Shell: Read · Search · Notes · Topics · Dashboard · Ingest views, active translation, pack modal. |
+| `src/features/` | `reader/` (reading pane), `notes/` (note panel + chapter rail), `library/` (all notes), `dashboard/`, `translations/` (pack manager), `ingest/` (upload, pipeline status, review), `topics/` (list, pages, graph), `search/`. |
 | `src/lib/api.ts` | Typed Tauri commands. `src/lib/reference.ts` — scripture reference parsing. |
 | `src-tauri/src/db.rs` | SQLite access + query commands (with unit tests). |
 | `src-tauri/src/packs.rs` | Pack registry, download, tokenizer, import. |
 | `src-tauri/src/lib.rs` | Tauri command registration + app setup. |
 | `src-tauri/src/ingest.rs` | Jobs, documents, pages, spans, verification. |
 | `src-tauri/src/sidecar.rs` | Worker process lifecycle + what it reports it can read. |
-| `sidecar/worker.py` | Job state machine. `sidecar/engines.py` — the reading engines. |
+| `src-tauri/src/graph.rs` | Reading the topic graph: topics, citations, references, edges. |
+| `src-tauri/src/search.rs` | Search: two lanes of cited passages, fused from words, topics, citations and meaning. |
+| `sidecar/worker.py` | Job state machine. `sidecar/engines.py` — the reading engines. `concepts.py`, `references.py` — topics and scripture references. `embeddings.py` — vectors for search by meaning. |
 | `src-tauri/migrations/` | Schema, applied in filename order on every start (each migration is idempotent). |
 | `src-tauri/packs/registry.json` | Downloadable translations. |
 | `scripts/import_bible.py` | Command-line equivalent of the in-app pack import. |
@@ -332,6 +334,86 @@ is **not** a synonym test: merging "grace" with "unmerited favour" needs
 embeddings and a person to confirm, and that pass isn't built yet. Likewise
 `concept_mentions.verified` and the `embedding` columns exist unused, because
 the merge and verse-suggestion passes will need somewhere to say so.
+
+## Search (Phase 6)
+
+The **Search** tab returns passages, never answers. There are two lanes, your
+notes and the Bible in the translation you're reading, and every result in
+either one is a chunk or a verse quoted whole, with where it came from. A query
+nothing matches shows **"No sources found"**: that is a result, not an error,
+and it's what `an_unknown_topic_finds_nothing_rather_than_something` tests.
+
+Each lane combines several independent ways of finding a passage, and every hit
+says which ones found it:
+
+| Found by | What it means | Needs |
+|---|---|---|
+| `words` | The words typed are in the passage (FTS5, as prefixes) | nothing |
+| `topic` | The query is a topic, and these are its recorded mentions | Phase 5 |
+| `cited` | A matching note cites this verse (Bible lane only) | Phase 5 |
+| `meaning` | Close in meaning, even if the words differ | a local embedding model |
+
+They are merged by **reciprocal rank fusion**, not by adding scores. bm25 and
+cosine are on different scales, and a passage found two ways ought to outrank
+one found strongly in only one.
+
+**Words** work out of the box. `chunks_fts` and `verses_fts` are
+external-content FTS5 tables kept in step by triggers, so they stay correct
+whichever process writes: the worker writes chunks, the app writes verses. The
+tokenizer folds diacritics ("romer" finds "Römer") but doesn't stem, so each
+query term is matched as a **prefix** instead ("Gnade" finds "Gnaden"). That
+copes with German declension without a second normaliser in Rust. Query text is
+always quoted before it reaches FTS, so `OR`, `NEAR(` or a stray `"` are just
+text.
+
+**Meaning** is optional, local, and checked rather than assumed:
+
+```bash
+ollama pull bge-m3      # multilingual; the notes are German
+```
+
+The worker gives each chunk and verse a vector, note passages first and then
+the translation you have open, and records which model made each one
+(`chunks.embedded_by`, `verse_vectors.model`). It reports that model and host
+in `settings.embedding`, and the app embeds the query with exactly that model:
+vectors from two different models can't be compared. Expect roughly 50 verses a
+second on Apple Silicon, so about ten minutes per translation, in the
+background. The search page says how far it has got, and says so when meaning
+is off and why.
+
+A vector only **ranks** passages that already exist. It is never turned back
+into text, so a weak model makes search worse, never untruthful. Below a
+similarity floor (`ROOTED_SEMANTIC_FLOOR`, default 0.55) a passage isn't
+reported at all. That floor is what keeps an unrelated query empty, and it
+has to be calibrated against **a whole translation, not a sample**. On 8
+verses, nonsense never scored above 0.31. On all 31,070 verses of ELB71,
+nonsense found something at 0.40–0.49 ("asdfgh" landed on a genealogy), while
+real multi-word queries topped out at 0.63–0.67. A relative test (z-score
+against the query's own distribution) doesn't separate the two; this floor
+does. Single words score like noise, so they get nothing from meaning, which is
+fine because the words lane covers them. Change the model and the floor has to
+be measured again.
+
+Verse vectors are kept in memory between queries (`search::VectorCache`, about
+120 MB for a 1024-dimension model over one translation) and reloaded when the
+count in the table changes, so the cache keeps up while the worker is still
+filling it. Search is brute force. That's fine at this scale and avoids
+loading a SQLite extension into both processes. sqlite-vec is the upgrade if
+it's ever needed.
+
+Env: `ROOTED_EMBED_MODEL` (default `bge-m3`), `ROOTED_OLLAMA_HOST` (shared with
+the topic extractor), `ROOTED_SEMANTIC_FLOOR`. The worker tests point
+`ROOTED_OLLAMA_HOST` at a closed port, so no test ever reaches a model server
+that happens to be running.
+
+### The topic graph
+
+**Topics → Graph** draws topics as nodes. An edge joins two topics **only where
+one passage mentions both**, and clicking it lists those passages with both
+mentions marked. Similarity is deliberately not drawn: it's a guess, and a line
+on a graph looks like a fact. The layout is Fruchterman–Reingold, run to rest
+before drawing and started from a spiral rather than random positions, so the
+same graph is drawn the same way on every visit.
 
 ## Notes without a reference
 
