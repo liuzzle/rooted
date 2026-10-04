@@ -28,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sqlite3
@@ -37,7 +38,9 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+import concepts
 import engines
+import references
 from engines import (
     EngineUnavailable,
     escalate_extraction,
@@ -547,6 +550,188 @@ class Worker:
             self.conn.execute("ROLLBACK")
             raise
 
+    # -- concepts -----------------------------------------------------------
+
+    def index_notes(self, limit: int = 5) -> int:
+        """Read topics out of notes that haven't been read yet.
+
+        Works from `notes`, not from `jobs`: a note typed in the app is as much
+        a source as one that arrived as a scan, and the graph would be a lie if
+        it only covered what came through ingestion.
+
+        A note is re-read when its text changes — mentions cite character
+        ranges, and an edited note moves them. Re-reading replaces that note's
+        chunks outright rather than patching, so a mention can never point into
+        text that is no longer there.
+        """
+        stale = self.conn.execute(
+            """SELECT n.note_id, n.title, n.body, s.source_id, s.text_hash, s.scheme
+                 FROM notes n
+                 LEFT JOIN sources s ON s.note_id = n.note_id
+                WHERE n.body <> ''
+                ORDER BY n.updated_at DESC
+                LIMIT 200"""
+        ).fetchall()
+
+        indexed = 0
+        for note in stale:
+            digest = hashlib.sha256(note["body"].encode("utf-8")).hexdigest()
+            unchanged = (
+                note["source_id"] is not None
+                and note["text_hash"] == digest
+                # Improving the extractor has to reach notes already read, or
+                # the graph is a mix of rules nobody can reason about.
+                and note["scheme"] == concepts.SCHEME
+            )
+            if unchanged:
+                continue
+            self.index_note(note["note_id"], note["body"], digest)
+            indexed += 1
+            if indexed >= limit:
+                break
+        return indexed
+
+    def index_note(self, note_id: int, body: str, digest: str) -> None:
+        """Find this note's topics, then find where each one is written.
+
+        Two steps on purpose. Topics are proposed from the *whole* note, since
+        that is the unit a person writes about something in; each one is then
+        located in each paragraph, so every stored mention has offsets into the
+        chunk that will cite it. A topic that doesn't appear in a paragraph
+        simply has no mention there.
+        """
+        lang = concepts.detect_language(body)
+        # Found first, so neither extractor mistakes a citation for a subject.
+        cited = [(r.start, r.end) for r in references.find_references(body)]
+        candidates: list[tuple[str, str]] = [
+            (label, "phrases")
+            for label in concepts.deterministic_labels(body, lang, cited)
+        ]
+        extractors = ["phrases"]
+
+        if concepts.ollama_available():
+            model = f"ollama/{concepts.OLLAMA_MODEL}"
+            try:
+                labels, rejected = concepts.ollama_labels(body)
+                candidates.extend((label, model) for label in labels)
+                extractors.append(model)
+                if rejected:
+                    # The gate doing its job, not an error — but worth seeing:
+                    # a rising count is how you learn an extractor has started
+                    # inventing rather than reading.
+                    print(f"[worker] note {note_id}: the gate rejected "
+                          f"{len(rejected)} non-verbatim candidate(s) from "
+                          f"{model}: {rejected[:5]}", file=sys.stderr, flush=True)
+            except concepts.ExtractionRejected as exc:
+                # Optional by design; the baseline already ran.
+                print(f"[worker] local model unavailable: {exc}",
+                      file=sys.stderr, flush=True)
+
+        # First proposer of a label wins, so the deterministic pass sets the
+        # spelling and the model can only add topics, never rename one.
+        seen: set[str] = set()
+        unique: list[tuple[str, str]] = []
+        for label, by in candidates:
+            key = concepts.key_of(label, lang)
+            if key and key not in seen:
+                seen.add(key)
+                unique.append((label, by))
+
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            source_id = self.upsert_source(note_id, digest, ",".join(extractors), lang)
+            # Replacing wholesale is what keeps offsets honest; the cascade
+            # takes the old mentions with the old chunks.
+            self.conn.execute("DELETE FROM chunks WHERE source_id = ?", (source_id,))
+            for idx, (start, end, text) in enumerate(concepts.chunk_text(body)):
+                refs = references.find_references(text)
+                cited_here = [(r.start, r.end) for r in refs]
+                cur = self.conn.execute(
+                    """INSERT INTO chunks (source_id, idx, char_start, char_end, text)
+                       VALUES (?,?,?,?,?)""",
+                    (source_id, idx, start, end, text),
+                )
+                chunk_id = cur.lastrowid
+                for label, by in unique:
+                    # Not every topic is in every paragraph; absence here is
+                    # ordinary, unlike absence from the note as a whole.
+                    for mention in concepts.locate_mentions(
+                        text, label, by, lang=lang, skip=cited_here
+                    ):
+                        self.record_mention(chunk_id, mention, lang, label)
+                for ref in refs:
+                    self.record_reference(chunk_id, ref)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    def upsert_source(self, note_id: int, digest: str, indexed_by: str,
+                      lang: str) -> int:
+        self.conn.execute(
+            """INSERT INTO sources
+                 (kind, note_id, text_hash, indexed_at, indexed_by, scheme, lang)
+               VALUES ('note', ?, ?, datetime('now'), ?, ?, ?)
+               -- The unique index is partial (notes only), so the conflict
+               -- target has to repeat its predicate.
+               ON CONFLICT(note_id) WHERE note_id IS NOT NULL DO UPDATE SET
+                 text_hash = excluded.text_hash,
+                 indexed_at = excluded.indexed_at,
+                 indexed_by = excluded.indexed_by,
+                 scheme = excluded.scheme,
+                 lang = excluded.lang""",
+            (note_id, digest, indexed_by, concepts.SCHEME, lang),
+        )
+        return self.conn.execute(
+            "SELECT source_id FROM sources WHERE note_id = ?", (note_id,)
+        ).fetchone()["source_id"]
+
+    def record_mention(self, chunk_id: int, mention: concepts.Mention,
+                       lang: str, label: str) -> None:
+        """One mention, filed under its concept.
+
+        `label` is the form the extractor chose for the topic as a whole — the
+        one the note uses most — while the mention keeps the form written at
+        *this* spot. Without the distinction a note saying "Herrn" before
+        "Herr" would name the topic after the declined form it happened to
+        write first.
+        """
+        key = concepts.key_of(label, lang)
+        self.conn.execute(
+            "INSERT INTO concepts (label, key) VALUES (?, ?)"
+            " ON CONFLICT(key) DO NOTHING",
+            (label, key),
+        )
+        concept_id = self.conn.execute(
+            "SELECT concept_id FROM concepts WHERE key = ?", (key,)
+        ).fetchone()["concept_id"]
+        self.conn.execute(
+            """INSERT INTO concept_mentions
+                 (concept_id, chunk_id, char_start, char_end, surface,
+                  extracted_by, confidence)
+               VALUES (?,?,?,?,?,?,?)
+               ON CONFLICT(chunk_id, char_start, char_end, concept_id) DO NOTHING""",
+            (concept_id, chunk_id, mention.start, mention.end, mention.surface,
+             mention.extracted_by, mention.confidence),
+        )
+
+    def record_reference(self, chunk_id: int, ref: references.Reference) -> None:
+        """A scripture reference the note wrote, kept where it was written.
+
+        Whether the verse exists in an installed translation is deliberately
+        not decided here — that answer changes when a pack is added or removed,
+        and a stored one would go stale.
+        """
+        self.conn.execute(
+            """INSERT INTO verse_links
+                 (chunk_id, char_start, char_end, surface, book_osis, chapter,
+                  verse, verse_end, verse_id)
+               VALUES (?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(chunk_id, char_start, char_end) DO NOTHING""",
+            (chunk_id, ref.start, ref.end, ref.surface, ref.book_osis,
+             ref.chapter, ref.verse, ref.verse_end, ref.verse_id),
+        )
+
     # -- loop ---------------------------------------------------------------
 
     def tick(self) -> int:
@@ -567,6 +752,11 @@ class Worker:
         ).fetchall():
             self.publish(self.job(row["job_id"]))
             advanced += 1
+
+        # Notes are read for topics after they exist, whether they came from a
+        # job or were typed in the app. A few per tick: this is background work
+        # and must never make the app wait.
+        advanced += self.index_notes()
 
         self.heartbeat()
         return advanced
