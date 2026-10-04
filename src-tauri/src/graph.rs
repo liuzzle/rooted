@@ -237,6 +237,145 @@ pub fn verse_text(
     })
 }
 
+/// A topic in the graph.
+#[derive(Serialize)]
+pub struct GraphNode {
+    pub concept_id: i64,
+    pub label: String,
+    pub notes: i64,
+}
+
+/// Two topics written about in the same passage, and in how many passages.
+/// The passages themselves are the evidence, fetched by `shared_passages`.
+#[derive(Serialize)]
+pub struct GraphEdge {
+    pub a: i64,
+    pub b: i64,
+    pub passages: i64,
+}
+
+#[derive(Serialize)]
+pub struct ConceptGraph {
+    pub nodes: Vec<GraphNode>,
+    pub edges: Vec<GraphEdge>,
+}
+
+/// The topic graph: the `limit` most-reached topics, joined where a passage
+/// mentions both.
+///
+/// An edge is co-occurrence in one chunk — one paragraph of one note — and
+/// nothing weaker. Not "similar", not "related": a person wrote these two
+/// things together, and the edge can show you where.
+pub fn concept_graph(conn: &Connection, limit: i64) -> Result<ConceptGraph, String> {
+    let nodes = collect_rows(
+        conn,
+        &format!(
+            "{SUMMARY_COLUMNS}
+              GROUP BY c.concept_id
+              ORDER BY notes DESC, mentions DESC, c.label
+              LIMIT ?1"
+        ),
+        [limit],
+        |r| {
+            Ok(GraphNode {
+                concept_id: r.get(0)?,
+                label: r.get(1)?,
+                notes: r.get(3)?,
+            })
+        },
+    )?;
+    let ids = nodes
+        .iter()
+        .map(|n| n.concept_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    if ids.is_empty() {
+        return Ok(ConceptGraph { nodes, edges: Vec::new() });
+    }
+    let edges = collect_rows(
+        conn,
+        &format!(
+            "SELECT x.concept_id, y.concept_id, COUNT(DISTINCT x.chunk_id)
+               FROM concept_mentions x
+               JOIN concept_mentions y
+                 ON y.chunk_id = x.chunk_id AND y.concept_id > x.concept_id
+              WHERE x.concept_id IN ({ids}) AND y.concept_id IN ({ids})
+              GROUP BY x.concept_id, y.concept_id"
+        ),
+        [],
+        |r| {
+            Ok(GraphEdge {
+                a: r.get(0)?,
+                b: r.get(1)?,
+                passages: r.get(2)?,
+            })
+        },
+    )?;
+    Ok(ConceptGraph { nodes, edges })
+}
+
+/// The passages behind an edge: every chunk that mentions both topics, with
+/// both marked. Each mark is a citation of its own.
+#[derive(Serialize)]
+pub struct SharedPassage {
+    pub note_id: i64,
+    pub note_title: Option<String>,
+    pub date: Option<String>,
+    pub speaker: Option<String>,
+    pub snippet: String,
+    pub marks: Vec<(i64, i64)>,
+}
+
+pub fn shared_passages(conn: &Connection, a: i64, b: i64) -> Result<Vec<SharedPassage>, String> {
+    let chunks = collect_rows(
+        conn,
+        "SELECT ch.chunk_id, n.note_id, n.title, n.date, n.speaker, ch.text
+           FROM chunks ch
+           JOIN sources s ON s.source_id = ch.source_id
+           JOIN notes n ON n.note_id = s.note_id
+          WHERE EXISTS (SELECT 1 FROM concept_mentions WHERE chunk_id = ch.chunk_id AND concept_id = ?1)
+            AND EXISTS (SELECT 1 FROM concept_mentions WHERE chunk_id = ch.chunk_id AND concept_id = ?2)
+          ORDER BY n.date IS NULL, n.date DESC, n.note_id, ch.idx",
+        [a, b],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                SharedPassage {
+                    note_id: r.get(1)?,
+                    note_title: r.get(2)?,
+                    date: r.get(3)?,
+                    speaker: r.get(4)?,
+                    snippet: r.get(5)?,
+                    marks: Vec::new(),
+                },
+            ))
+        },
+    )?;
+    let mut out = Vec::new();
+    for (chunk_id, mut passage) in chunks {
+        passage.marks = collect_rows(
+            conn,
+            "SELECT char_start, char_end FROM concept_mentions
+              WHERE chunk_id = ?1 AND concept_id IN (?2, ?3)
+              ORDER BY char_start",
+            [chunk_id, a, b],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        out.push(passage);
+    }
+    Ok(out)
+}
+
+fn collect_rows<T, P, F>(conn: &Connection, sql: &str, params: P, f: F) -> Result<Vec<T>, String>
+where
+    P: rusqlite::Params,
+    F: FnMut(&rusqlite::Row) -> rusqlite::Result<T>,
+{
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params, f).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +526,61 @@ mod tests {
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].label, "covenant");
+    }
+
+    /// A second topic mentioned in the chunk `indexed` just made.
+    fn also_mentions(conn: &Connection, label: &str, at: (i64, i64)) -> i64 {
+        let chunk_id: i64 = conn
+            .query_row("SELECT MAX(chunk_id) FROM chunks", [], |r| r.get(0))
+            .unwrap();
+        let text: String = conn
+            .query_row("SELECT text FROM chunks WHERE chunk_id = ?1", [chunk_id], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO concepts (label, key) VALUES (?1, ?2) ON CONFLICT(key) DO NOTHING",
+            rusqlite::params![label, label.to_lowercase()],
+        )
+        .unwrap();
+        let concept_id: i64 = conn
+            .query_row("SELECT concept_id FROM concepts WHERE key = ?1", [label.to_lowercase()], |r| r.get(0))
+            .unwrap();
+        conn.execute(
+            "INSERT INTO concept_mentions (concept_id, chunk_id, char_start, char_end, surface, extracted_by)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'phrases')",
+            rusqlite::params![concept_id, chunk_id, at.0, at.1, &text[at.0 as usize..at.1 as usize]],
+        )
+        .unwrap();
+        concept_id
+    }
+
+    #[test]
+    fn an_edge_is_two_topics_written_in_one_passage() {
+        let conn = fixture();
+        let covenant = indexed(&conn, "One", "covenant and grace", "covenant", (0, 8));
+        let grace = also_mentions(&conn, "grace", (13, 18));
+        indexed(&conn, "Two", "covenant alone", "covenant", (0, 8));
+        indexed(&conn, "Three", "Melchizedek alone", "Melchizedek", (0, 11));
+
+        let graph = concept_graph(&conn, 10).unwrap();
+
+        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.edges.len(), 1, "topics never written together aren't joined");
+        let edge = &graph.edges[0];
+        assert_eq!((edge.a.min(edge.b), edge.a.max(edge.b)), (covenant.min(grace), covenant.max(grace)));
+        assert_eq!(edge.passages, 1);
+    }
+
+    #[test]
+    fn an_edge_shows_the_passage_that_makes_it() {
+        let conn = fixture();
+        let covenant = indexed(&conn, "One", "covenant and grace", "covenant", (0, 8));
+        let grace = also_mentions(&conn, "grace", (13, 18));
+
+        let shared = shared_passages(&conn, covenant, grace).unwrap();
+
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].snippet, "covenant and grace");
+        assert_eq!(shared[0].marks, vec![(0, 8), (13, 18)]);
     }
 
     #[test]

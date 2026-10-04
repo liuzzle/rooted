@@ -2,6 +2,7 @@ mod db;
 mod graph;
 mod ingest;
 mod packs;
+mod search;
 mod sidecar;
 
 use db::{
@@ -340,6 +341,24 @@ fn concepts_for_note(
     graph::concepts_for_note(&conn, note_id)
 }
 
+/// The topic graph: topics joined where one passage mentions both.
+#[tauri::command]
+fn concept_graph(state: State<Db>, limit: i64) -> Result<graph::ConceptGraph, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::concept_graph(&conn, limit)
+}
+
+/// The passages behind one edge of the graph.
+#[tauri::command]
+fn shared_passages(
+    state: State<Db>,
+    a: i64,
+    b: i64,
+) -> Result<Vec<graph::SharedPassage>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    graph::shared_passages(&conn, a, b)
+}
+
 /// Scripture references written inside a note, positioned in its body.
 #[tauri::command]
 fn note_references(
@@ -359,6 +378,79 @@ fn get_verse_text(
 ) -> Result<Option<String>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     graph::verse_text(&conn, translation_id, &verse_id)
+}
+
+// --- search ----------------------------------------------------------------
+
+/// Search notes and the Bible in the translation being read.
+///
+/// The query is embedded only if the worker said which model read the text and
+/// that model answers now; otherwise the lanes come from words, topics and
+/// citations, and `meaning.detail` says why. The database lock is never held
+/// across the call to the model.
+#[tauri::command]
+async fn search(
+    state: State<'_, Db>,
+    cache: State<'_, search::VectorCache>,
+    query: String,
+    translation_id: i64,
+) -> Result<search::Results, String> {
+    let config = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        search::embedding_config(&conn)?
+    };
+    let floor = std::env::var("ROOTED_SEMANTIC_FLOOR")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(search::DEFAULT_FLOOR);
+
+    let mut meaning = search::Meaning::default();
+    let mut vector = None;
+    match &config {
+        None => {
+            meaning.detail = "the worker hasn't reported an embedding model yet".into();
+        }
+        Some(c) if !c.available => {
+            meaning.model = Some(c.model.clone());
+            meaning.detail = format!(
+                "{} isn't available — start Ollama and run `ollama pull {}`",
+                c.model, c.model
+            );
+        }
+        Some(c) if query.trim().is_empty() => meaning.model = Some(c.model.clone()),
+        Some(c) => {
+            meaning.model = Some(c.model.clone());
+            match search::embed_query(c, &query).await {
+                Ok(v) => vector = Some(v),
+                Err(e) => meaning.detail = format!("{} didn't answer: {e}", c.model),
+            }
+        }
+    }
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let model = config.as_ref().map(|c| c.model.as_str());
+    let (notes, bible) = search::search(
+        &conn,
+        &query,
+        translation_id,
+        model.zip(vector.as_deref()),
+        &cache,
+        floor,
+    )?;
+    if let Some(model) = model {
+        let (nr, nt, vr, vt) = search::coverage(&conn, translation_id, model)?;
+        meaning.notes_read = nr;
+        meaning.notes_total = nt;
+        meaning.verses_read = vr;
+        meaning.verses_total = vt;
+    }
+    meaning.used = vector.is_some();
+    Ok(search::Results {
+        query,
+        notes,
+        bible,
+        meaning,
+    })
 }
 
 // --- translation packs -----------------------------------------------------
@@ -468,6 +560,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(Db(std::sync::Mutex::new(conn)))
         .manage(worker)
+        .manage(search::VectorCache::default())
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 window.state::<sidecar::Sidecar>().stop();
@@ -509,6 +602,9 @@ pub fn run() {
             concepts_for_note,
             note_references,
             get_verse_text,
+            search,
+            concept_graph,
+            shared_passages,
             delete_job,
             worker_status
         ])
