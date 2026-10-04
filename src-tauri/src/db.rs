@@ -40,6 +40,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0007_extraction_scheme", include_str!("../migrations/0007_extraction_scheme.sql")),
     ("0008_verse_links", include_str!("../migrations/0008_verse_links.sql")),
     ("0009_search", include_str!("../migrations/0009_search.sql")),
+    ("0010_review", include_str!("../migrations/0010_review.sql")),
 ];
 
 /// Enable foreign keys and apply the canonical schema (idempotent).
